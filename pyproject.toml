@@ -1,0 +1,21 @@
+[project]
+name = "scheduler"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "huggingface-hub>=2.4.0",
+    "torch>=2.15.0",
+    "transformers>=5.22.1",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.4.0",
+    "matplotlib>=3.11.2",
+]
+
+[tool.ruff.lint]
+# `# %%` cell files import inside the cells that use them
+ignore = ["E402"]
