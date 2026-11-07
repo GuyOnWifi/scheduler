@@ -1,3 +1,5 @@
+from model.batch_meta import BatchMeta
+from model.kv_cache import KVCache
 import dataclasses
 from safetensors import safe_open
 import torch
@@ -43,16 +45,20 @@ class Qwen3(nn.Module):
         self.register_buffer("sin", sin.to(dtype=cfg.torch_dtype), persistent=False)
         self.register_buffer("cos", cos.to(dtype=cfg.torch_dtype), persistent=False)
 
-    def forward(self, x):
-        nb, nt = x.shape
+    def forward(self, x, meta: BatchMeta, kv_cache: KVCache):
 
         x = self.embed_tokens(x)
-        mask = torch.triu(
-            torch.ones(nt, nt, device=x.device, dtype=torch.bool), diagonal=1
-        )
+        # mask = torch.triu(
+        #     torch.ones(nt, nt, device=x.device, dtype=torch.bool), diagonal=1
+        # )
 
-        for blk in self.layers:
-            x = blk(x, mask, self.sin, self.cos)
+        positions = meta.positions  # (nb, nt), from the engine
+
+        sin = self.sin[positions].to(x.dtype)
+        cos = self.cos[positions].to(x.dtype)
+
+        for i, blk in enumerate(self.layers):
+            x = blk(x, meta, (kv_cache.k[i], kv_cache.v[i]), (sin, cos))
 
         x = self.norm(x)
         x = self.lm_head(x)

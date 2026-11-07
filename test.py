@@ -1,4 +1,6 @@
 from model.qwen import Qwen3
+from model.batch_meta import BatchMeta
+from model.kv_cache import KVCache
 from pathlib import Path
 from huggingface_hub import snapshot_download
 import torch
@@ -42,7 +44,15 @@ for p in prompts:
     ids = torch.tensor([tokenizer.encode(p)], device=device)
     with torch.no_grad():
         ref = ref_qwen(ids).logits
-        ours = our_qwen(ids)
+        # the net takes (x, meta, kv_cache) now: one full prefill into a fresh cache
+        n = ids.shape[1]
+        cfg = our_qwen.cfg
+        cache = KVCache.alloc(
+            cfg.num_hidden_layers, 1, cfg.num_key_value_heads, n, cfg.head_dim,
+            device=device, dtype=DTYPE,
+        )
+        meta = BatchMeta(torch.tensor([n], device=device), torch.arange(n, device=device)[None])
+        ours = our_qwen(ids, meta, cache)
         torch.testing.assert_close(ref, ours, rtol=1e-3, atol=1e-3)
 
 print("Done testing")
