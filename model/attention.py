@@ -21,8 +21,8 @@ def apply_rope(x, sin, cos):
     half = x.shape[-1] // 2
     x1, x2 = x[..., :half], x[..., half:]
 
-    cos = cos[:nt].unsqueeze(0).unsqueeze(0)
-    sin = sin[:nt].unsqueeze(0).unsqueeze(0)
+    cos = cos[:, None]
+    sin = sin[:, None]
 
     x_rot = x * cos + torch.cat([-x2, x1], dim=-1) * sin
     return x_rot.to(dtype=x.dtype)
@@ -52,9 +52,18 @@ class GroupQueryAttention(nn.Module):
         self.o_proj = nn.Linear(self.out_dim, embd_dim, dtype=dtype, bias=False)
 
     def forward(
-        self, x: torch.Tensor, mask: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor,
+        sin: torch.Tensor,
+        cos: torch.Tensor,
+        positions: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
     ):
         # x is (num_batch, num_toks, embd_dim)
+        # mask is (num_batch, num_toks, max_toks), True = blocked
+        # positions is (num_batch, num_toks), absolute position of each new token
+        # kv_cache is this layer's (k, v), each (batch, num_kv_heads, max_len, head_dim)
         (nb, nt, embd_dim) = x.shape
 
         q = self.q_proj(x)  # (num_batch, num_toks, q_heads * head_dim)
@@ -73,11 +82,24 @@ class GroupQueryAttention(nn.Module):
         q_rope = apply_rope(q_norm, sin, cos)
         k_rope = apply_rope(k_norm, sin, cos)
 
-        v_expanded = torch.repeat_interleave(v_head, self.groups, dim=1)
-        k_expanded = torch.repeat_interleave(k_rope, self.groups, dim=1)
+        (k_cache, v_cache) = kv_cache
+        rows = torch.arange(nb, device=x.device)[:, None]  # [B, 1]
+        k_cache[rows, :, positions] = k_rope.transpose(
+            1, 2
+        )  # [B, T, kv_heads, head_dim]
+        v_cache[rows, :, positions] = v_head.transpose(
+            1, 2
+        )  # [B, T, kv_heads, head_dim]
+
+        max_toks = mask.shape[-1]
+        k_all = k_cache[:, :, :max_toks, :]  # (nb, kvh, max_toks, hd)
+        v_all = v_cache[:, :, :max_toks, :]
+
+        v_expanded = torch.repeat_interleave(v_all, self.groups, dim=1)
+        k_expanded = torch.repeat_interleave(k_all, self.groups, dim=1)
 
         att = q_rope @ k_expanded.transpose(2, 3)
-        att_masked = att.masked_fill(mask, -torch.inf)
+        att_masked = att.masked_fill(mask[:, None], -torch.inf)  # mask over all heads
         att_weights = torch.softmax(
             att_masked / self.head_dim**0.5, dim=-1, dtype=torch.float32
         ).to(x.dtype)

@@ -1,9 +1,11 @@
+from model.kv_cache import KVCache
 from dataclasses import dataclass
 
 import torch
 
 from bench.engine import Engine
 from bench.types import Request, TokenEvent
+from model.kv_cache import KVCache
 from model.model import Model
 
 
@@ -22,11 +24,15 @@ class RunningReq:
 
 
 class StaticBatching(Engine):
-    def __init__(self, model: Model, n_batch=8):
+    def __init__(self, model: Model, n_batch=8, max_len=2048):
         self.n_batch = n_batch
+        self.max_len = max_len
         self.model = model
         self.waiting_queue: list[Request] = []
         self.running: list[RunningReq] = []
+        self.cache = model.alloc_cache(n_batch, max_len)
+        self.batch_cache: KVCache | None = None
+        self.prefill = False
 
     def add_request(self, req: Request):
         self.waiting_queue.append(req)
@@ -41,17 +47,37 @@ class StaticBatching(Engine):
                 )
                 for r in batch
             ]
+            for r in batch:
+                if len(r.prompt_ids) + r.max_tokens > self.max_len:
+                    raise ValueError(
+                        f"request {r.req_id} needs more than max_len={self.max_len} tokens"
+                    )
+            nb = len(batch)
+            self.batch_cache = KVCache(
+                self.cache.k[:, :nb], self.cache.v[:, :nb], self.cache.seq_len[:nb]
+            )
+            self.batch_cache.seq_len.zero_()
+            self.prefill = True
 
         if not self.running:
             return []
 
-        # pack into 2d
-        token_list = [torch.tensor(x.toks) for x in self.running]
-        lengths = torch.tensor([len(x.toks) for x in self.running])
+        next_toks = []
+        if self.prefill:
+            token_list = [torch.tensor(x.toks) for x in self.running]
+            lengths = torch.tensor([len(x.toks) for x in self.running])
 
-        token_list = torch.nn.utils.rnn.pad_sequence(token_list, batch_first=True)
-        out = self.model.forward(token_list, lengths)
-        next_toks = out.argmax(-1).tolist()
+            token_list = torch.nn.utils.rnn.pad_sequence(token_list, batch_first=True)
+            out = self.model.forward(token_list, lengths, self.batch_cache)
+            next_toks = out.argmax(-1).tolist()
+
+            self.prefill = False
+        else:
+            token_list = torch.tensor([x.toks[-1] for x in self.running])[:, None]
+            lengths = torch.ones(len(self.running), dtype=torch.long)
+
+            out = self.model.forward(token_list, lengths, self.batch_cache)
+            next_toks = out.argmax(-1).tolist()
 
         toks = []
         for req, t in zip(self.running, next_toks):

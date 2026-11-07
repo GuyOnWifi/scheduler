@@ -16,9 +16,9 @@ class Block(nn.Module):
         self.post_attention_layernorm = RMSNorm(embd_dim, dtype)
         self.mlp = FeedForward(embd_dim, hidden_dim, dtype)
 
-    def forward(self, x, mask, sin, cos):
+    def forward(self, x, mask, sin, cos, positions, kv_cache):
         res = self.input_layernorm(x)
-        res = self.self_attn(res, mask, sin, cos)
+        res = self.self_attn(res, mask, sin, cos, positions, kv_cache)
         x += res
 
         res = self.post_attention_layernorm(x)

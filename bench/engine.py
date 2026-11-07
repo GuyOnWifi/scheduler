@@ -33,7 +33,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         "--engine",
         choices=ENGINES,
         default="static",
-        help="static: our Qwen3-0.6B, static batches of 8, no KV cache",
+        help="static: our Qwen3-0.6B, static batches of 8, contiguous KV cache",
     )
 
 

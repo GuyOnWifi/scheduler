@@ -1,3 +1,4 @@
+from model.kv_cache import KVCache
 import json
 from pathlib import Path
 from typing import Self
@@ -34,8 +35,25 @@ class Qwen3LM:
         eos = json.loads((path / "generation_config.json").read_text())["eos_token_id"]
         return cls(net, tokenizer, frozenset(eos if isinstance(eos, list) else [eos]))
 
+    def alloc_cache(self, batch: int, max_len: int) -> KVCache:
+        cfg = self.net.cfg
+        weight = self.net.embed_tokens.weight
+        return KVCache.alloc(
+            cfg.num_hidden_layers,
+            batch,
+            cfg.num_key_value_heads,
+            max_len,
+            cfg.head_dim,
+            device=weight.device,
+            dtype=weight.dtype,
+        )
+
     @torch.inference_mode()
-    def forward(self, input_ids: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-        logits = self.net(input_ids.to(self.net.embed_tokens.weight.device))  # [B, T, vocab]
+    def forward(
+        self, input_ids: torch.Tensor, lengths: torch.Tensor, kv_cache: KVCache
+    ) -> torch.Tensor:
+        logits = self.net(
+            input_ids.to(self.net.embed_tokens.weight.device), lengths, kv_cache
+        )  # [B, T, vocab]
         rows = torch.arange(len(lengths), device=logits.device)
         return logits[rows, lengths.to(logits.device) - 1]

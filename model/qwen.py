@@ -1,3 +1,4 @@
+from model.kv_cache import KVCache
 import dataclasses
 from safetensors import safe_open
 import torch
@@ -43,17 +44,25 @@ class Qwen3(nn.Module):
         self.register_buffer("sin", sin.to(dtype=cfg.torch_dtype), persistent=False)
         self.register_buffer("cos", cos.to(dtype=cfg.torch_dtype), persistent=False)
 
-    def forward(self, x):
+    def forward(self, x, lengths, kv_cache: KVCache):
         nb, nt = x.shape
 
         x = self.embed_tokens(x)
-        mask = torch.triu(
-            torch.ones(nt, nt, device=x.device, dtype=torch.bool), diagonal=1
-        )
+        # mask = torch.triu(
+        #     torch.ones(nt, nt, device=x.device, dtype=torch.bool), diagonal=1
+        # )
 
-        for blk in self.layers:
-            x = blk(x, mask, self.sin, self.cos)
+        positions = kv_cache.seq_len[:, None] + torch.arange(nt, device=x.device)
+        max_toks = int(kv_cache.seq_len.max()) + nt
+        mask = torch.arange(max_toks, device=x.device) > positions[:, :, None]
 
+        sin = self.sin[positions].to(x.dtype)
+        cos = self.cos[positions].to(x.dtype)
+
+        for i, blk in enumerate(self.layers):
+            x = blk(x, mask, sin, cos, positions, (kv_cache.k[i], kv_cache.v[i]))
+
+        kv_cache.seq_len += lengths.to(x.device)
         x = self.norm(x)
         x = self.lm_head(x)
 
