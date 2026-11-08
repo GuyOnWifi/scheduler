@@ -31,7 +31,9 @@ PROMPTS = [
     ("A long prompt about engineers. " * 30, 10),
     ("请用一句话解释什么是注意力机制。", 14),
 ]
-UP_FRONT = 6  # added before the first step; the rest arrive one every ARRIVAL_EVERY steps
+UP_FRONT = (
+    6  # added before the first step; the rest arrive one every ARRIVAL_EVERY steps
+)
 ARRIVAL_EVERY = 3
 
 
@@ -44,6 +46,11 @@ def make_engine(name: str, lm: Qwen3LM):
         from engines.continous_batch import ContinousBatching
 
         return ContinousBatching(lm, n_batch=N_SLOTS)
+
+    if name == "chunked":
+        from engines.chunked import ChunkedEngine
+
+        return ChunkedEngine(lm, n_batch=N_SLOTS)
     raise SystemExit(f"unknown engine {name!r}; use static or continuous")
 
 
@@ -53,7 +60,9 @@ def reference(lm: Qwen3LM, req: Request) -> tuple[list[int], list[float]]:
     ids = torch.tensor([req.prompt_ids])
     toks, gaps = [], []
     while True:
-        logits = lm.forward(ids, torch.tensor([ids.shape[1]]), cache, torch.tensor([0]))[0].float()
+        logits = lm.forward(
+            ids, torch.tensor([ids.shape[1]]), cache, torch.tensor([0])
+        )[0].float()
         top2 = logits.topk(2).values
         t = int(logits.argmax())
         toks.append(t)
@@ -107,14 +116,23 @@ def main():
         else:
             finished_at = [i for i, ev in enumerate(evs) if ev.finished]
             if finished_at != [len(evs) - 1]:
-                problems.append(f"finished=True at event indices {finished_at}, want only the last")
+                problems.append(
+                    f"finished=True at event indices {finished_at}, want only the last"
+                )
         if got != want:
-            i = next((i for i, (a, b) in enumerate(zip(got, want)) if a != b), min(len(got), len(want)))
+            i = next(
+                (i for i, (a, b) in enumerate(zip(got, want)) if a != b),
+                min(len(got), len(want)),
+            )
             gap = f", reference top-2 gap {gaps[i]:.4f}" if i < len(gaps) else ""
-            problems.append(f"tokens differ at index {i} (got {len(got)}, want {len(want)}{gap})")
+            problems.append(
+                f"tokens differ at index {i} (got {len(got)}, want {len(want)}{gap})"
+            )
         status = "ok  " if not problems else "FAIL"
-        print(f"{status} req {req.req_id:2d} prompt {len(prompts_before[req.req_id]):3d} tok, max {req.max_tokens:2d}: "
-              + ("; ".join(problems) or repr(lm.tokenizer.decode(got)[:40])))
+        print(
+            f"{status} req {req.req_id:2d} prompt {len(prompts_before[req.req_id]):3d} tok, max {req.max_tokens:2d}: "
+            + ("; ".join(problems) or repr(lm.tokenizer.decode(got)[:40]))
+        )
         if problems:
             print(f"       got  {got}\n       want {want}")
             failures += 1
