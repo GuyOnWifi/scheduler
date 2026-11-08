@@ -20,7 +20,8 @@ class Model(Protocol):
     ) -> torch.Tensor:
         """New tokens input_ids [B, T], right-padded, with real lengths meta.lengths [B] -> last-token logits [B, vocab].
 
-        Writes the new tokens into kv_cache at meta.positions; each attends to every
-        cached position <= its own.
+        Batch row i lives in cache row meta.slot_ids[i]. Writes the new tokens into those
+        rows at meta.positions; each attends to every cached position <= its own in its
+        row; other rows are untouched.
         """
         ...

@@ -52,6 +52,7 @@ class Qwen3(nn.Module):
         #     torch.ones(nt, nt, device=x.device, dtype=torch.bool), diagonal=1
         # )
 
+        # slot_ids (nb): batch row i lives in cache row slot_ids[i]
         positions = meta.positions  # (nb, nt), from the engine
 
         sin = self.sin[positions].to(x.dtype)

@@ -63,6 +63,7 @@ class GroupQueryAttention(nn.Module):
         # meta.positions is (num_batch, num_toks), absolute position of each new token
         # kv_cache is this layer's (k, v), each (batch, num_kv_heads, max_len, head_dim)
         # rope is (sin, cos), each (num_batch, num_toks, head_dim), at those positions
+        # meta.slot_ids is (num_batch), the cache row of each batch row
         (nb, nt, embd_dim) = x.shape
         positions = meta.positions
         sin, cos = rope
@@ -84,7 +85,7 @@ class GroupQueryAttention(nn.Module):
         k_rope = apply_rope(k_norm, sin, cos)
 
         (k_cache, v_cache) = kv_cache
-        rows = torch.arange(nb, device=x.device)[:, None]  # [B, 1]
+        rows = meta.slot_ids[:, None]  # [B, 1]
         k_cache[rows, :, positions] = k_rope.transpose(
             1, 2
         )  # [B, T, kv_heads, head_dim]
@@ -95,8 +96,8 @@ class GroupQueryAttention(nn.Module):
         # mask is (num_batch, num_toks, max_toks), True = blocked: causal by position
         max_toks = int(positions.max()) + 1
         mask = torch.arange(max_toks, device=x.device) > positions[:, :, None]
-        k_all = k_cache[:, :, :max_toks, :]  # (nb, kvh, max_toks, hd)
-        v_all = v_cache[:, :, :max_toks, :]
+        k_all = k_cache[meta.slot_ids, :, :max_toks, :]  # (nb, kvh, max_toks, hd), a gather (copy)
+        v_all = v_cache[meta.slot_ids, :, :max_toks, :]
 
         v_expanded = torch.repeat_interleave(v_all, self.groups, dim=1)
         k_expanded = torch.repeat_interleave(k_all, self.groups, dim=1)

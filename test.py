@@ -51,7 +51,11 @@ for p in prompts:
             cfg.num_hidden_layers, 1, cfg.num_key_value_heads, n, cfg.head_dim,
             device=device, dtype=DTYPE,
         )
-        meta = BatchMeta(torch.tensor([n], device=device), torch.arange(n, device=device)[None])
+        meta = BatchMeta(
+            torch.tensor([n], device=device),
+            torch.tensor([0], device=device),
+            torch.arange(n, device=device)[None],
+        )
         ours = our_qwen(ids, meta, cache)
         torch.testing.assert_close(ref, ours, rtol=1e-3, atol=1e-3)
 

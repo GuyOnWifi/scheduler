@@ -17,17 +17,17 @@ class Engine(Protocol):
 def make(dtype=None, **engine_kwargs) -> Engine:
     """Our Qwen3-0.6B behind the one engine in engine.py (edited in place every rung).
 
-    Now: static batches of 8, contiguous KV cache.
+    Now: same model, 8 slots refilled every step, prefill-first.
     """
     # Imported here: engine.py imports this module for the Engine protocol, and
     # `bench.py --help` shouldn't have to load torch.
     import torch
 
-    from engine import StaticBatching
+    from engine import ContinousBatching
     from model.qwen3_lm import Qwen3LM
 
     lm = Qwen3LM.from_pretrained(dtype=dtype or torch.bfloat16)
-    return StaticBatching(lm, **engine_kwargs)
+    return ContinousBatching(lm, **engine_kwargs)
 
 
 def from_args(args: argparse.Namespace) -> Engine:
