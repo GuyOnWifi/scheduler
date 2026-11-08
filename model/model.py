@@ -15,10 +15,15 @@ class Model(Protocol):
         ...
 
     def forward(
-        self, input_ids: torch.Tensor, lengths: torch.Tensor, kv_cache: KVCache
+        self,
+        input_ids: torch.Tensor,
+        lengths: torch.Tensor,
+        kv_cache: KVCache,
+        slot_ids: torch.Tensor,
     ) -> torch.Tensor:
         """New tokens input_ids [B, T], right-padded, with real lengths [B] -> last-token logits [B, vocab].
 
-        Writes the new tokens into kv_cache and advances kv_cache.seq_len by lengths.
+        Batch row i lives in cache row slot_ids[i]. Writes the new tokens into those rows
+        and advances kv_cache.seq_len[slot_ids] by lengths; other rows are untouched.
         """
         ...

@@ -25,7 +25,16 @@ def static_qwen3() -> Engine:
     return StaticBatching(Qwen3LM.from_pretrained(dtype=torch.bfloat16))
 
 
-ENGINES = {"static": static_qwen3}
+def continuous_qwen3() -> Engine:
+    import torch
+
+    from engines.continous_batch import ContinousBatching
+    from model.qwen3_lm import Qwen3LM
+
+    return ContinousBatching(Qwen3LM.from_pretrained(dtype=torch.bfloat16))
+
+
+ENGINES = {"static": static_qwen3, "continuous": continuous_qwen3}
 
 
 def add_args(parser: argparse.ArgumentParser) -> None:
@@ -33,7 +42,8 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         "--engine",
         choices=ENGINES,
         default="static",
-        help="static: our Qwen3-0.6B, static batches of 8, contiguous KV cache",
+        help="static: our Qwen3-0.6B, static batches of 8, contiguous KV cache; "
+        "continuous: same model, 8 slots refilled every step, prefill-first",
     )
 
 

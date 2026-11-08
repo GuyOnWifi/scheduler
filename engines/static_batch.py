@@ -68,7 +68,9 @@ class StaticBatching(Engine):
             lengths = torch.tensor([len(x.toks) for x in self.running])
 
             token_list = torch.nn.utils.rnn.pad_sequence(token_list, batch_first=True)
-            out = self.model.forward(token_list, lengths, self.batch_cache)
+            out = self.model.forward(
+                token_list, lengths, self.batch_cache, torch.arange(len(self.running))
+            )
             next_toks = out.argmax(-1).tolist()
 
             self.prefill = False
@@ -76,7 +78,9 @@ class StaticBatching(Engine):
             token_list = torch.tensor([x.toks[-1] for x in self.running])[:, None]
             lengths = torch.ones(len(self.running), dtype=torch.long)
 
-            out = self.model.forward(token_list, lengths, self.batch_cache)
+            out = self.model.forward(
+                token_list, lengths, self.batch_cache, torch.arange(len(self.running))
+            )
             next_toks = out.argmax(-1).tolist()
 
         toks = []

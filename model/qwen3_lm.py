@@ -50,10 +50,15 @@ class Qwen3LM:
 
     @torch.inference_mode()
     def forward(
-        self, input_ids: torch.Tensor, lengths: torch.Tensor, kv_cache: KVCache
+        self,
+        input_ids: torch.Tensor,
+        lengths: torch.Tensor,
+        kv_cache: KVCache,
+        slot_ids: torch.Tensor,
     ) -> torch.Tensor:
+        device = self.net.embed_tokens.weight.device
         logits = self.net(
-            input_ids.to(self.net.embed_tokens.weight.device), lengths, kv_cache
+            input_ids.to(device), lengths, kv_cache, slot_ids.to(device)
         )  # [B, T, vocab]
         rows = torch.arange(len(lengths), device=logits.device)
         return logits[rows, lengths.to(logits.device) - 1]

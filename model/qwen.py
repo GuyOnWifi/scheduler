@@ -44,7 +44,7 @@ class Qwen3(nn.Module):
         self.register_buffer("sin", sin.to(dtype=cfg.torch_dtype), persistent=False)
         self.register_buffer("cos", cos.to(dtype=cfg.torch_dtype), persistent=False)
 
-    def forward(self, x, lengths, kv_cache: KVCache):
+    def forward(self, x, lengths, kv_cache: KVCache, slot_ids):
         nb, nt = x.shape
 
         x = self.embed_tokens(x)
@@ -52,17 +52,21 @@ class Qwen3(nn.Module):
         #     torch.ones(nt, nt, device=x.device, dtype=torch.bool), diagonal=1
         # )
 
-        positions = kv_cache.seq_len[:, None] + torch.arange(nt, device=x.device)
-        max_toks = int(kv_cache.seq_len.max()) + nt
+        # slot_ids (nb): batch row i lives in cache row slot_ids[i]
+        seq_len = kv_cache.seq_len[slot_ids]
+        positions = seq_len[:, None] + torch.arange(nt, device=x.device)
+        max_toks = int(seq_len.max()) + nt
         mask = torch.arange(max_toks, device=x.device) > positions[:, :, None]
 
         sin = self.sin[positions].to(x.dtype)
         cos = self.cos[positions].to(x.dtype)
 
         for i, blk in enumerate(self.layers):
-            x = blk(x, mask, sin, cos, positions, (kv_cache.k[i], kv_cache.v[i]))
+            x = blk(
+                x, mask, sin, cos, positions, (kv_cache.k[i], kv_cache.v[i]), slot_ids
+            )
 
-        kv_cache.seq_len += lengths.to(x.device)
+        kv_cache.seq_len[slot_ids] += lengths.to(x.device)
         x = self.norm(x)
         x = self.lm_head(x)
 
