@@ -1,3 +1,5 @@
+from flashinfer import BatchPrefillWithPagedKVCacheWrapper
+from flashinfer import BatchDecodeWithPagedKVCacheWrapper
 from model.batch_meta import BatchMeta
 from model.kv_cache import KVCache
 import dataclasses
@@ -45,7 +47,30 @@ class Qwen3(nn.Module):
         self.register_buffer("sin", sin.to(dtype=cfg.torch_dtype), persistent=False)
         self.register_buffer("cos", cos.to(dtype=cfg.torch_dtype), persistent=False)
 
+        self.ws = torch.empty(
+            128 << 20, dtype=torch.uint8, device="cuda"
+        )  # scratch space for the kernel
+        self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+            self.ws, kv_layout="HND"
+        )
+
     def forward(self, x, meta: BatchMeta, kv_cache: KVCache):
+        indptr = torch.nn.functional.pad(meta.lengths.cumsum(0), (1, 0)).int()
+        paged_kv_indptr = torch.arange(len(meta.slot_ids) + 1).int()
+        paged_kv_indices = meta.slot_ids.int()
+        last_page_lens = (meta.positions[:, 0] + meta.lengths).int()
+        self.prefill_wrapper.plan(
+            indptr,
+            paged_kv_indptr,
+            paged_kv_indices,
+            last_page_lens,
+            self.cfg.num_attention_heads,
+            self.cfg.num_key_value_heads,
+            self.cfg.head_dim,
+            kv_cache.k.shape[3],
+            causal=True,
+            q_data_type=self.embed_tokens.weight.dtype,
+        )
 
         x = self.embed_tokens(x)
         # mask = torch.triu(
@@ -59,7 +84,13 @@ class Qwen3(nn.Module):
         cos = self.cos[positions].to(x.dtype)
 
         for i, blk in enumerate(self.layers):
-            x = blk(x, meta, (kv_cache.k[i], kv_cache.v[i]), (sin, cos))
+            x = blk(
+                x,
+                meta,
+                (kv_cache.k[i], kv_cache.v[i]),
+                (sin, cos),
+                self.prefill_wrapper,
+            )
 
         x = self.norm(x)
         x = self.lm_head(x)

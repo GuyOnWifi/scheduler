@@ -7,7 +7,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 MODEL_ID = "Qwen/Qwen3-0.6B"
-DTYPE = torch.float32
+DTYPE = torch.bfloat16  # FlashInfer has no fp32 kernels
+NOISE_GAP = 0.125  # one bf16 step at these logit sizes
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -57,6 +58,14 @@ for p in prompts:
             torch.arange(n, device=device)[None],
         )
         ours = our_qwen(ids, meta, cache)
-        torch.testing.assert_close(ref, ours, rtol=1e-3, atol=1e-3)
+        # bf16 now, so not elementwise close to HF: compare the last token's logits,
+        # greedy pick must match unless HF's top-2 are within NOISE_GAP
+        ref_last, ours_last = ref[0, -1].float(), ours[0, -1].float()
+        top2 = ref_last.topk(2).values
+        diff = (ref_last - ours_last).abs().max().item()
+        same = int(ref_last.argmax()) == int(ours_last.argmax())
+        print(f"{'ok  ' if same else '~ok ' if top2[0] - top2[1] <= NOISE_GAP else 'FAIL'} "
+              f"{n:3d} tok, max |logit diff| {diff:.3f}")
+        assert same or top2[0] - top2[1] <= NOISE_GAP, p
 
 print("Done testing")

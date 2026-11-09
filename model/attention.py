@@ -1,3 +1,4 @@
+from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 import torch
 from model.batch_meta import BatchMeta
 from model.rmsnorm import RMSNorm
@@ -58,6 +59,7 @@ class GroupQueryAttention(nn.Module):
         meta: BatchMeta,
         kv_cache: tuple[torch.Tensor, torch.Tensor],
         rope: tuple[torch.Tensor, torch.Tensor],
+        prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper,
     ):
         # x is (num_batch, num_toks, embd_dim)
         # meta.positions is (num_batch, num_toks), absolute position of each new token
@@ -93,21 +95,12 @@ class GroupQueryAttention(nn.Module):
             1, 2
         )  # [B, T, kv_heads, head_dim]
 
-        # mask is (num_batch, num_toks, max_toks), True = blocked: causal by position
-        max_toks = int(positions.max()) + 1
-        mask = torch.arange(max_toks, device=x.device) > positions[:, :, None]
-        k_all = k_cache[meta.slot_ids, :, :max_toks, :]  # (nb, kvh, max_toks, hd), a gather (copy)
-        v_all = v_cache[meta.slot_ids, :, :max_toks, :]
+        valid = torch.arange(nt, device=x.device) < meta.lengths[:, None]
+        out = prefill_wrapper.run(
+            q_rope.transpose(1, 2)[valid], (k_cache, v_cache)
+        )  # (N, qh, hd)
 
-        v_expanded = torch.repeat_interleave(v_all, self.groups, dim=1)
-        k_expanded = torch.repeat_interleave(k_all, self.groups, dim=1)
-
-        att = q_rope @ k_expanded.transpose(2, 3)
-        att_masked = att.masked_fill(mask[:, None], -torch.inf)  # mask over all heads
-        att_weights = torch.softmax(
-            att_masked / self.head_dim**0.5, dim=-1, dtype=torch.float32
-        ).to(x.dtype)
-
-        final = (att_weights @ v_expanded).transpose(1, 2).reshape(nb, nt, self.out_dim)
-
-        return self.o_proj(final)
+        # unpack back to (nb, nt, ...); padding rows stay zero
+        o = x.new_zeros(nb, nt, self.num_q_heads, self.head_dim)
+        o[valid] = out
+        return self.o_proj(o.reshape(nb, nt, self.out_dim))

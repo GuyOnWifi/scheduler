@@ -18,7 +18,8 @@ def make(dtype=None, **engine_kwargs) -> Engine:
     """Our Qwen3-0.6B behind the one engine in engine.py (edited in place every rung).
 
     Now: 8 slots, every step runs all decodes plus prefill chunks within a
-    512-token budget.
+    512-token budget; attention is FlashInfer's paged prefill kernel (bf16 only),
+    each slot one 2048-token page.
     """
     # Imported here: engine.py imports this module for the Engine protocol, and
     # `bench.py --help` shouldn't have to load torch.
