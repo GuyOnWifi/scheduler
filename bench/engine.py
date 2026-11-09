@@ -34,7 +34,20 @@ def continuous_qwen3() -> Engine:
     return ContinousBatching(Qwen3LM.from_pretrained(dtype=torch.bfloat16))
 
 
-ENGINES = {"static": static_qwen3, "continuous": continuous_qwen3}
+def chunked_qwen3() -> Engine:
+    import torch
+
+    from engines.chunked import ChunkedEngine
+    from model.qwen3_lm import Qwen3LM
+
+    return ChunkedEngine(Qwen3LM.from_pretrained(dtype=torch.bfloat16))
+
+
+ENGINES = {
+    "static": static_qwen3,
+    "continuous": continuous_qwen3,
+    "chunked": chunked_qwen3,
+}
 
 
 def add_args(parser: argparse.ArgumentParser) -> None:
@@ -43,7 +56,9 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         choices=ENGINES,
         default="static",
         help="static: our Qwen3-0.6B, static batches of 8, contiguous KV cache; "
-        "continuous: same model, 8 slots refilled every step, prefill-first",
+        "continuous: same model, 8 slots refilled every step, prefill-first; "
+        "chunked: 8 slots, every step runs all decodes plus prefill chunks within a "
+        "512-token budget",
     )
 
 

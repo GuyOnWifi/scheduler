@@ -2,6 +2,7 @@ from tokenizers import Tokenizer
 import torch
 from typing import Protocol
 
+from model.batch_meta import BatchMeta
 from model.kv_cache import KVCache
 
 
@@ -17,13 +18,13 @@ class Model(Protocol):
     def forward(
         self,
         input_ids: torch.Tensor,
-        lengths: torch.Tensor,
+        meta: BatchMeta,
         kv_cache: KVCache,
-        slot_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """New tokens input_ids [B, T], right-padded, with real lengths [B] -> last-token logits [B, vocab].
+        """New tokens input_ids [B, T], right-padded, with real lengths meta.lengths [B] -> last-token logits [B, vocab].
 
-        Batch row i lives in cache row slot_ids[i]. Writes the new tokens into those rows
-        and advances kv_cache.seq_len[slot_ids] by lengths; other rows are untouched.
+        Batch row i lives in cache row meta.slot_ids[i]; its new tokens go at meta.positions[i].
+        Writes them into those rows and advances kv_cache.seq_len[slot_ids] by lengths;
+        other rows are untouched.
         """
         ...

@@ -13,6 +13,7 @@ import sys
 import torch
 
 from bench.types import Request, TokenEvent
+from model.batch_meta import BatchMeta
 from model.qwen3_lm import Qwen3LM
 
 N_SLOTS = 4
@@ -59,10 +60,12 @@ def reference(lm: Qwen3LM, req: Request) -> tuple[list[int], list[float]]:
     cache = lm.alloc_cache(1, len(req.prompt_ids) + req.max_tokens)
     ids = torch.tensor([req.prompt_ids])
     toks, gaps = [], []
+    pos = 0
     while True:
-        logits = lm.forward(
-            ids, torch.tensor([ids.shape[1]]), cache, torch.tensor([0])
-        )[0].float()
+        n = ids.shape[1]
+        meta = BatchMeta(torch.tensor([n]), torch.tensor([0]), torch.arange(pos, pos + n)[None])
+        logits = lm.forward(ids, meta, cache)[0].float()
+        pos += n
         top2 = logits.topk(2).values
         t = int(logits.argmax())
         toks.append(t)

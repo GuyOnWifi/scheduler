@@ -7,6 +7,7 @@ import torch
 from bench.engine import Engine
 from bench.types import Request, TokenEvent
 from model.kv_cache import KVCache
+from model.batch_meta import BatchMeta
 from model.model import Model
 
 
@@ -62,15 +63,21 @@ class ContinousBatching(Engine):
             slots = torch.tensor([x.slot for x in to_prefill])
 
             token_list = torch.nn.utils.rnn.pad_sequence(token_list, batch_first=True)
-            out = self.model.forward(token_list, lengths, self.cache, slots)
+            positions = torch.arange(token_list.shape[1]).expand(len(to_prefill), -1)
+            out = self.model.forward(
+                token_list, BatchMeta(lengths, slots, positions), self.cache
+            )
             next_toks = out.argmax(-1).tolist()
             next_toks = zip(to_prefill, next_toks)
         else:
             token_list = torch.tensor([x.toks[-1] for x in self.running])[:, None]
             lengths = torch.ones(len(self.running), dtype=torch.long)
             slots = torch.tensor([x.slot for x in self.running])
+            positions = torch.tensor([len(x.toks) - 1 for x in self.running])[:, None]
 
-            out = self.model.forward(token_list, lengths, self.cache, slots)
+            out = self.model.forward(
+                token_list, BatchMeta(lengths, slots, positions), self.cache
+            )
             next_toks = out.argmax(-1).tolist()
             next_toks = zip(self.running, next_toks)
 

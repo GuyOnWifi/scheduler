@@ -7,6 +7,7 @@ import torch
 from bench.engine import Engine
 from bench.types import Request, TokenEvent
 from model.kv_cache import KVCache
+from model.batch_meta import BatchMeta
 from model.model import Model
 
 
@@ -91,8 +92,10 @@ class ChunkedEngine(Engine):
             prefill_token_list = torch.nn.utils.rnn.pad_sequence(
                 prefill_token_list, batch_first=True
             )
+            starts = torch.tensor([x.num_computed for (x, b) in to_prefill])
+            positions = starts[:, None] + torch.arange(prefill_token_list.shape[1])
             prefill_out = self.model.forward(
-                prefill_token_list, lengths, self.cache, slots
+                prefill_token_list, BatchMeta(lengths, slots, positions), self.cache
             )
             prefill_next_toks = prefill_out.argmax(-1).tolist()
 
@@ -113,9 +116,10 @@ class ChunkedEngine(Engine):
             decode_token_list = torch.tensor([x.toks[-1] for x in to_decode])[:, None]
             lengths = torch.ones(len(to_decode), dtype=torch.long)
             slots = torch.tensor([x.slot for x in to_decode])
+            positions = torch.tensor([x.num_computed for x in to_decode])[:, None]
 
             decode_out = self.model.forward(
-                decode_token_list, lengths, self.cache, slots
+                decode_token_list, BatchMeta(lengths, slots, positions), self.cache
             )
             decode_next_toks = decode_out.argmax(-1).tolist()
 

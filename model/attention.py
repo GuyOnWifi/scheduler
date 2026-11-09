@@ -1,3 +1,4 @@
+from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 import torch
 from model.rmsnorm import RMSNorm
 from torch import nn
@@ -54,12 +55,10 @@ class GroupQueryAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        mask: torch.Tensor,
-        sin: torch.Tensor,
-        cos: torch.Tensor,
-        positions: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, torch.Tensor],
-        slot_ids: torch.Tensor,
+        meta,
+        kv_cache,
+        rope_params,
+        prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper,
     ):
         # x is (num_batch, num_toks, embd_dim)
         # mask is (num_batch, num_toks, max_toks), True = blocked
@@ -81,31 +80,25 @@ class GroupQueryAttention(nn.Module):
         q_norm = self.q_norm(q_head)
         k_norm = self.k_norm(k_head)
 
+        (sin, cos) = rope_params
         q_rope = apply_rope(q_norm, sin, cos)
         k_rope = apply_rope(k_norm, sin, cos)
 
         (k_cache, v_cache) = kv_cache
-        rows = slot_ids[:, None]  # [B, 1]
-        k_cache[rows, :, positions] = k_rope.transpose(
+        rows = meta.slot_ids[:, None]  # [B, 1]
+        k_cache[rows, :, meta.positions] = k_rope.transpose(
             1, 2
         )  # [B, T, kv_heads, head_dim]
-        v_cache[rows, :, positions] = v_head.transpose(
+        v_cache[rows, :, meta.positions] = v_head.transpose(
             1, 2
         )  # [B, T, kv_heads, head_dim]
 
-        max_toks = mask.shape[-1]
-        k_all = k_cache[slot_ids, :, :max_toks, :]  # (nb, kvh, max_toks, hd), a gather (copy)
-        v_all = v_cache[slot_ids, :, :max_toks, :]
+        valid = torch.arange(nt, device=x.device) < meta.lengths[:, None]
+        out = prefill_wrapper.run(
+            q_rope.transpose(1, 2)[valid], (k_cache, v_cache)
+        )  # (N, qh, hd)
 
-        v_expanded = torch.repeat_interleave(v_all, self.groups, dim=1)
-        k_expanded = torch.repeat_interleave(k_all, self.groups, dim=1)
-
-        att = q_rope @ k_expanded.transpose(2, 3)
-        att_masked = att.masked_fill(mask[:, None], -torch.inf)  # mask over all heads
-        att_weights = torch.softmax(
-            att_masked / self.head_dim**0.5, dim=-1, dtype=torch.float32
-        ).to(x.dtype)
-
-        final = (att_weights @ v_expanded).transpose(1, 2).reshape(nb, nt, self.out_dim)
-
-        return self.o_proj(final)
+        # unpack back to (nb, nt, ...); padding rows stay zero
+        o = x.new_zeros(nb, nt, self.num_q_heads, self.head_dim)
+        o[valid] = out
+        return self.o_proj(o.reshape(nb, nt, self.out_dim))

@@ -1,3 +1,4 @@
+from model.batch_meta import BatchMeta
 from model.kv_cache import KVCache
 import json
 from pathlib import Path
@@ -52,13 +53,11 @@ class Qwen3LM:
     def forward(
         self,
         input_ids: torch.Tensor,
-        lengths: torch.Tensor,
+        meta: BatchMeta,
         kv_cache: KVCache,
-        slot_ids: torch.Tensor,
     ) -> torch.Tensor:
         device = self.net.embed_tokens.weight.device
-        logits = self.net(
-            input_ids.to(device), lengths, kv_cache, slot_ids.to(device)
-        )  # [B, T, vocab]
-        rows = torch.arange(len(lengths), device=logits.device)
-        return logits[rows, lengths.to(logits.device) - 1]
+        meta = meta.to(device)
+        logits = self.net(input_ids.to(device), meta, kv_cache)  # [B, T, vocab]
+        rows = torch.arange(len(meta.lengths), device=logits.device)
+        return logits[rows, meta.lengths - 1]

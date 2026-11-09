@@ -6,6 +6,7 @@ import torch
 from bench.engine import Engine
 from bench.types import Request, TokenEvent
 from model.kv_cache import KVCache
+from model.batch_meta import BatchMeta
 from model.model import Model
 
 
@@ -68,8 +69,11 @@ class StaticBatching(Engine):
             lengths = torch.tensor([len(x.toks) for x in self.running])
 
             token_list = torch.nn.utils.rnn.pad_sequence(token_list, batch_first=True)
+            positions = torch.arange(token_list.shape[1]).expand(len(self.running), -1)
             out = self.model.forward(
-                token_list, lengths, self.batch_cache, torch.arange(len(self.running))
+                token_list,
+                BatchMeta(lengths, torch.arange(len(self.running)), positions),
+                self.batch_cache,
             )
             next_toks = out.argmax(-1).tolist()
 
@@ -78,8 +82,11 @@ class StaticBatching(Engine):
             token_list = torch.tensor([x.toks[-1] for x in self.running])[:, None]
             lengths = torch.ones(len(self.running), dtype=torch.long)
 
+            positions = torch.tensor([len(x.toks) - 1 for x in self.running])[:, None]
             out = self.model.forward(
-                token_list, lengths, self.batch_cache, torch.arange(len(self.running))
+                token_list,
+                BatchMeta(lengths, torch.arange(len(self.running)), positions),
+                self.batch_cache,
             )
             next_toks = out.argmax(-1).tolist()
 
