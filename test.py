@@ -55,12 +55,12 @@ for p in prompts:
         meta = BatchMeta(
             torch.tensor([n], device=device),
             torch.tensor([0], device=device),
-            torch.arange(n, device=device)[None],
+            torch.arange(n, device=device),
         )
-        ours = our_qwen(ids, meta, cache)
+        ours = our_qwen(ids[0], meta, cache)  # packed [N] in, last-token logits [1, vocab] out
         # bf16 now, so not elementwise close to HF: compare the last token's logits,
         # greedy pick must match unless HF's top-2 are within NOISE_GAP
-        ref_last, ours_last = ref[0, -1].float(), ours[0, -1].float()
+        ref_last, ours_last = ref[0, -1].float(), ours[0].float()
         top2 = ref_last.topk(2).values
         diff = (ref_last - ours_last).abs().max().item()
         same = int(ref_last.argmax()) == int(ours_last.argmax())

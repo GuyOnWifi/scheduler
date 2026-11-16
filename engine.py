@@ -27,7 +27,7 @@ class RunningReq:
         return hit_eos or self.generated >= self.max_tokens
 
 
-class ChunkedEngine(Engine):
+class ChunkedRagged(Engine):
     def __init__(self, model: Model, n_batch=8, tok_budget=512, max_len=2048):
         self.n_batch = n_batch
         self.max_len = max_len
@@ -66,40 +66,48 @@ class ChunkedEngine(Engine):
             # next_toks = out.argmax(-1).tolist()
             # next_toks = zip(to_prefill, next_toks)
 
-        # two forwards: one for prefill tokens, one for decode
-        to_decode = [r for r in self.running if (len(r.toks) - r.num_computed) == 1]
+        # one forward now
+        to_process = [
+            (r, 1) for r in self.running if (len(r.toks) - r.num_computed) == 1
+        ]
         prefill_list = deque(
             [r for r in self.running if (len(r.toks) - r.num_computed) > 1]
         )
-        to_prefill = []
-        budget = self.tok_budget - len(to_decode)
+        budget = self.tok_budget - len(to_process)
         while prefill_list and budget > 0:
             req = prefill_list.popleft()
             wants = len(req.toks) - req.num_computed
             b = min(budget, wants)
-            to_prefill.append((req, b))
+            to_process.append((req, b))
             budget -= b
 
-        if to_prefill:
+        if to_process:
             # prefill forward
             prefill_token_list = [
                 torch.tensor(x.toks[x.num_computed : x.num_computed + b])
-                for (x, b) in to_prefill
+                for (x, b) in to_process
             ]
 
-            lengths = torch.tensor([b for (x, b) in to_prefill])
-            slots = torch.tensor([x.slot for (x, b) in to_prefill])
-            prefill_token_list = torch.nn.utils.rnn.pad_sequence(
-                prefill_token_list, batch_first=True
+            lengths = torch.tensor([b for (x, b) in to_process])
+            slots = torch.tensor([x.slot for (x, b) in to_process])
+            prefill_token_list = torch.cat(prefill_token_list, dim=0)
+
+            # prefill_token_list = torch.nn.utils.rnn.pad_sequence(
+            #     prefill_token_list, batch_first=True
+            # )
+            starts = torch.tensor([x.num_computed for (x, b) in to_process])
+            positions = torch.cat(
+                [
+                    torch.arange(start, start + ln)
+                    for (start, ln) in zip(starts, lengths)
+                ]
             )
-            starts = torch.tensor([x.num_computed for (x, b) in to_prefill])
-            positions = starts[:, None] + torch.arange(prefill_token_list.shape[1])
             prefill_out = self.model.forward(
                 prefill_token_list, BatchMeta(lengths, slots, positions), self.cache
             )
             prefill_next_toks = prefill_out.argmax(-1).tolist()
 
-            for (req, b), t in zip(to_prefill, prefill_next_toks):
+            for (req, b), t in zip(to_process, prefill_next_toks):
                 if req.num_computed + b == len(req.toks):
                     req.toks.append(t)
                     req.generated += 1
@@ -109,27 +117,6 @@ class ChunkedEngine(Engine):
 
                 if req.done:
                     self.free_kv_slots.append(req.slot)
-
-        if to_decode:
-            # decode forward
-            decode_token_list = torch.tensor([x.toks[-1] for x in to_decode])[:, None]
-            lengths = torch.ones(len(to_decode), dtype=torch.long)
-            slots = torch.tensor([x.slot for x in to_decode])
-            positions = torch.tensor([x.num_computed for x in to_decode])[:, None]
-
-            decode_out = self.model.forward(
-                decode_token_list, BatchMeta(lengths, slots, positions), self.cache
-            )
-            decode_next_toks = decode_out.argmax(-1).tolist()
-
-            for req, t in zip(to_decode, decode_next_toks):
-                req.toks.append(t)
-                req.generated += 1
-                req.num_computed += 1
-
-                if req.done:
-                    self.free_kv_slots.append(req.slot)
-                toks.append(TokenEvent(req.req_id, t, req.done))
 
         self.running = [r for r in self.running if not r.done]
 

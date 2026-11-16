@@ -18,7 +18,7 @@ def rope_tables(head_dim, base=1_000_000, context_len=4096):
 
 
 def apply_rope(x, sin, cos):
-    nb, nh, nt, head_dim = x.shape
+    nt, nh, head_dim = x.shape
     # split it into two
     half = x.shape[-1] // 2
     x1, x2 = x[..., :half], x[..., half:]
@@ -61,24 +61,20 @@ class GroupQueryAttention(nn.Module):
         rope: tuple[torch.Tensor, torch.Tensor],
         prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper,
     ):
-        # x is (num_batch, num_toks, embd_dim)
-        # meta.positions is (num_batch, num_toks), absolute position of each new token
+        # x is (num_toks, embd_dim)
         # kv_cache is this layer's (k, v), each (batch, num_kv_heads, max_len, head_dim)
-        # rope is (sin, cos), each (num_batch, num_toks, head_dim), at those positions
-        # meta.slot_ids is (num_batch), the cache row of each batch row
-        (nb, nt, embd_dim) = x.shape
+        # rope is (sin, cos), each (num_toks, head_dim), at those positions
+        (nt, embd_dim) = x.shape
         positions = meta.positions
         sin, cos = rope
 
-        q = self.q_proj(x)  # (num_batch, num_toks, q_heads * head_dim)
-        k = self.k_proj(x)  # (num_batch, num_toks, kv_heads * head_dim)
-        v = self.v_proj(x)  # (num_batch, num_toks, kv_heads * head_dim)
+        q = self.q_proj(x)  # (num_toks, q_heads * head_dim)
+        k = self.k_proj(x)  # (num_toks, kv_heads * head_dim)
+        v = self.v_proj(x)  # (num_toks, kv_heads * head_dim)
 
-        q_head = q.view(nb, nt, self.num_q_heads, self.head_dim).transpose(
-            1, 2
-        )  # (nb, qh, nt, hd)
-        k_head = k.view(nb, nt, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v_head = v.view(nb, nt, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        q_head = q.view(nt, self.num_q_heads, self.head_dim)
+        k_head = k.view(nt, self.num_kv_heads, self.head_dim)
+        v_head = v.view(nt, self.num_kv_heads, self.head_dim)
 
         q_norm = self.q_norm(q_head)
         k_norm = self.k_norm(k_head)
@@ -87,20 +83,11 @@ class GroupQueryAttention(nn.Module):
         k_rope = apply_rope(k_norm, sin, cos)
 
         (k_cache, v_cache) = kv_cache
-        rows = meta.slot_ids[:, None]  # [B, 1]
-        k_cache[rows, :, positions] = k_rope.transpose(
-            1, 2
-        )  # [B, T, kv_heads, head_dim]
-        v_cache[rows, :, positions] = v_head.transpose(
-            1, 2
-        )  # [B, T, kv_heads, head_dim]
+        rows = meta.slot_ids.repeat_interleave(meta.lengths)
+        k_cache[rows, :, positions] = k_rope
+        v_cache[rows, :, positions] = v_head
 
-        valid = torch.arange(nt, device=x.device) < meta.lengths[:, None]
-        out = prefill_wrapper.run(
-            q_rope.transpose(1, 2)[valid], (k_cache, v_cache)
-        )  # (N, qh, hd)
+        out = prefill_wrapper.run(q_rope, (k_cache, v_cache))  # (N, qh, hd)
 
         # unpack back to (nb, nt, ...); padding rows stay zero
-        o = x.new_zeros(nb, nt, self.num_q_heads, self.head_dim)
-        o[valid] = out
-        return self.o_proj(o.reshape(nb, nt, self.out_dim))
+        return self.o_proj(out.reshape(nt, self.out_dim))

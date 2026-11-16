@@ -55,6 +55,4 @@ class Qwen3LM:
     ) -> torch.Tensor:
         device = self.net.embed_tokens.weight.device
         meta = meta.to(device)
-        logits = self.net(input_ids.to(device), meta, kv_cache)  # [B, T, vocab]
-        rows = torch.arange(len(meta.lengths), device=logits.device)
-        return logits[rows, meta.lengths - 1]
+        return self.net(input_ids.to(device), meta, kv_cache)  # [B, vocab]

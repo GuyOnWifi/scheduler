@@ -8,12 +8,11 @@ import torch
 class BatchMeta:
     """Per-step description of a batch, built by the engine; the cache is the long-lived state.
 
-    Requests are right-padded: input_ids is [B, T], T = lengths.max().
+    Requests are packed: input_ids is [N], N = lengths.sum(), requests back to back in order.
 
-    lengths:   [B] real new tokens per row; row i's output is the logits after its last
-               real token, input_ids[i, lengths[i] - 1]
+    lengths:   [B] number of new tokens of request i
     slot_ids:  [B] cache row that batch row i lives in
-    positions: [B, T] absolute position of each new token within its request; its K/V
+    positions: [N] absolute position of each new token within its request; its K/V
                is written to that position of the request's cache row
     """
 

@@ -17,19 +17,18 @@ class Engine(Protocol):
 def make(dtype=None, **engine_kwargs) -> Engine:
     """Our Qwen3-0.6B behind the one engine in engine.py (edited in place every rung).
 
-    Now: 8 slots, every step runs all decodes plus prefill chunks within a
-    512-token budget; attention is FlashInfer's paged prefill kernel (bf16 only),
-    each slot one 2048-token page.
+    Now: chunked's schedule as one packed forward per step (no padding);
+    FlashInfer attention, each of the 8 slots one 2048-token page.
     """
     # Imported here: engine.py imports this module for the Engine protocol, and
     # `bench.py --help` shouldn't have to load torch.
     import torch
 
-    from engine import ChunkedEngine
+    from engine import ChunkedRagged
     from model.qwen3_lm import Qwen3LM
 
     lm = Qwen3LM.from_pretrained(dtype=dtype or torch.bfloat16)
-    return ChunkedEngine(lm, **engine_kwargs)
+    return ChunkedRagged(lm, **engine_kwargs)
 
 
 def from_args(args: argparse.Namespace) -> Engine:
