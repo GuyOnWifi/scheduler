@@ -1,7 +1,12 @@
 """Check an engine's greedy tokens against a one-request-at-a-time reference, in bf16.
 
-    uv run python test_engine.py static
-    uv run python test_engine.py continuous
+    uv run python test_engine.py paged [TOK_BUDGET] [NUM_PAGES]
+
+The model takes a paged KV cache now, so only the paged engine runs (static,
+continuous, chunked and ragged still build the old metadata). For paged, a small
+TOK_BUDGET (e.g. 16) splits prompts into several chunks, and a small NUM_PAGES
+(e.g. 16 pages of 16 tokens; 24 is still enough) runs out of memory mid-run and
+forces preemption. The largest request needs 12 pages, so stay at or above that.
 
 Requests arrive staggered (some up front, the rest mid-run), there are more of them
 than slots, and their max_tokens differ, so slots get freed and refilled at
@@ -13,6 +18,7 @@ rounding. A first mismatch where the reference's top-2 logit gap is <= NOISE_GAP
 """
 
 import sys
+from math import ceil
 
 import torch
 
@@ -21,6 +27,7 @@ from model.batch_meta import BatchMeta
 from model.qwen3_lm import Qwen3LM
 
 N_SLOTS = 4
+PAGE_SIZE = 16
 
 PROMPTS = [
     ("The capital of France is", 12),
@@ -63,18 +70,44 @@ def make_engine(name: str, lm: Qwen3LM):
 
         return ChunkedRagged(lm, n_batch=N_SLOTS)
 
-    raise SystemExit(f"unknown engine {name!r}; use static or continuous")
+    if name == "paged":
+        from engines.chunked_ragged_paged import ChunkedRaggedPaged
+
+        kwargs = {}
+        if len(sys.argv) > 2:
+            kwargs["tok_budget"] = int(sys.argv[2])
+        if len(sys.argv) > 3:
+            kwargs["num_pages"] = int(sys.argv[3])
+        return ChunkedRaggedPaged(lm, page_size=PAGE_SIZE, **kwargs)
+
+    raise SystemExit(f"unknown engine {name!r}; use paged")
 
 
 def reference(lm: Qwen3LM, req: Request) -> tuple[list[int], list[float]]:
     """Greedy tokens for one request alone, plus the top-1/top-2 logit gap at each step."""
-    cache = lm.alloc_cache(1, len(req.prompt_ids) + req.max_tokens)
+    ps = PAGE_SIZE
+    num_pages = ceil((len(req.prompt_ids) + req.max_tokens) / ps)
+    cache = lm.alloc_cache(num_pages, ps)
+    pages = list(range(num_pages))  # this request owns the whole pool, in order
     ids = torch.tensor(req.prompt_ids)
     toks, gaps = [], []
     pos = 0
     while True:
         n = len(ids)
-        meta = BatchMeta(torch.tensor([n]), torch.tensor([0]), torch.arange(pos, pos + n))
+        kv_len = pos + n  # KV length after this step, new tokens included
+        used = ceil(kv_len / ps)
+        meta = BatchMeta(
+            lengths=torch.tensor([n]),
+            paged_kv_indptr=torch.tensor([0, used], dtype=torch.int32),
+            paged_kv_indices=torch.tensor(pages[:used], dtype=torch.int32),
+            slot_mappings=torch.tensor(
+                [pages[p // ps] * ps + p % ps for p in range(pos, kv_len)]
+            ),
+            positions=torch.arange(pos, kv_len),
+            indptr=torch.tensor([0, n], dtype=torch.int32),
+            last_page_lens=torch.tensor([(kv_len - 1) % ps + 1], dtype=torch.int32),
+            page_size=ps,
+        )
         logits = lm.forward(ids, meta, cache)[0].float()
         pos += n
         top2 = logits.topk(2).values

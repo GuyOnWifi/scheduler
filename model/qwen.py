@@ -1,3 +1,4 @@
+from model.kv_cache import PagedKVCache
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 from flashinfer import BatchDecodeWithPagedKVCacheWrapper
 from model.batch_meta import BatchMeta
@@ -54,25 +55,20 @@ class Qwen3(nn.Module):
             self.ws, kv_layout="HND"
         )
 
-    def forward(self, x, meta: BatchMeta, kv_cache: KVCache):
-        indptr = torch.nn.functional.pad(meta.lengths.cumsum(0), (1, 0)).int()
-        paged_kv_indptr = torch.arange(len(meta.slot_ids) + 1).int()
-        paged_kv_indices = meta.slot_ids.int()
-        last_page_lens = (meta.positions[indptr[1:] - 1] + 1).int()
+    def forward(self, x, meta: BatchMeta, kv_cache: PagedKVCache):
+
         self.prefill_wrapper.plan(
-            indptr,
-            paged_kv_indptr,
-            paged_kv_indices,
-            last_page_lens,
+            meta.indptr,
+            meta.paged_kv_indptr,
+            meta.paged_kv_indices,
+            meta.last_page_lens,
             self.cfg.num_attention_heads,
             self.cfg.num_key_value_heads,
             self.cfg.head_dim,
-            kv_cache.k.shape[3],
+            meta.page_size,
             causal=True,
             q_data_type=self.embed_tokens.weight.dtype,
         )
-
-        lengths, slot_ids = meta.lengths, meta.slot_ids
 
         x = self.embed_tokens(x)
         # mask = torch.triu(
@@ -89,13 +85,12 @@ class Qwen3(nn.Module):
             x = blk(
                 x,
                 meta,
-                (kv_cache.k[i], kv_cache.v[i]),
+                (kv_cache.kv[i]),
                 (sin, cos),
                 self.prefill_wrapper,
             )
 
-        kv_cache.seq_len[slot_ids] += lengths.to(x.device)
-        x = x[indptr[1:] - 1]
+        x = x[meta.indptr[1:] - 1]
         x = self.norm(x)
         x = self.lm_head(x)
 

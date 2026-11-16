@@ -43,10 +43,30 @@ def chunked_qwen3() -> Engine:
     return ChunkedEngine(Qwen3LM.from_pretrained(dtype=torch.bfloat16))
 
 
+def ragged_qwen3() -> Engine:
+    import torch
+
+    from engines.chunked_ragged import ChunkedRagged
+    from model.qwen3_lm import Qwen3LM
+
+    return ChunkedRagged(Qwen3LM.from_pretrained(dtype=torch.bfloat16))
+
+
+def paged_qwen3() -> Engine:
+    import torch
+
+    from engines.chunked_ragged_paged import ChunkedRaggedPaged
+    from model.qwen3_lm import Qwen3LM
+
+    return ChunkedRaggedPaged(Qwen3LM.from_pretrained(dtype=torch.bfloat16))
+
+
 ENGINES = {
     "static": static_qwen3,
     "continuous": continuous_qwen3,
     "chunked": chunked_qwen3,
+    "ragged": ragged_qwen3,
+    "paged": paged_qwen3,
 }
 
 
@@ -58,7 +78,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         help="static: our Qwen3-0.6B, static batches of 8, contiguous KV cache; "
         "continuous: same model, 8 slots refilled every step, prefill-first; "
         "chunked: 8 slots, every step runs all decodes plus prefill chunks within a "
-        "512-token budget",
+        "512-token budget; "
+        "ragged: chunked's schedule as one packed forward per step (no padding); "
+        "paged: ragged with a paged KV pool (2048 pages of 16 tokens) instead of 8 "
+        "slots, admission by free pages, newest-first preemption by recompute",
     )
 
 
