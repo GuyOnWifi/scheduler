@@ -10,7 +10,7 @@ class BatchMeta:
 
     lengths:   [B] real number of new tokens in each batch row (input_ids is right-padded)
     slot_ids:  [B] cache row that batch row i lives in
-    positions: [B, T] absolute position of each new token (padding continues the count)
+    positions: [N] absolute position of each new token (padding continues the count)
     """
 
     lengths: torch.Tensor

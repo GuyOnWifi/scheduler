@@ -58,7 +58,7 @@ class Qwen3(nn.Module):
         indptr = torch.nn.functional.pad(meta.lengths.cumsum(0), (1, 0)).int()
         paged_kv_indptr = torch.arange(len(meta.slot_ids) + 1).int()
         paged_kv_indices = meta.slot_ids.int()
-        last_page_lens = (meta.positions[:, 0] + meta.lengths).int()
+        last_page_lens = (meta.positions[indptr[1:] - 1] + 1).int()
         self.prefill_wrapper.plan(
             indptr,
             paged_kv_indptr,
@@ -72,7 +72,6 @@ class Qwen3(nn.Module):
             q_data_type=self.embed_tokens.weight.dtype,
         )
 
-        nb, nt = x.shape
         lengths, slot_ids = meta.lengths, meta.slot_ids
 
         x = self.embed_tokens(x)
@@ -81,9 +80,9 @@ class Qwen3(nn.Module):
         # )
 
         # slot_ids (nb): batch row i lives in cache row slot_ids[i]
-        positions = meta.positions  # (nb, nt), from the engine
+        positions = meta.positions  # (nt), from the engine
 
-        sin = self.sin[positions].to(x.dtype)
+        sin = self.sin[positions].to(x.dtype)  # (nt, hd)
         cos = self.cos[positions].to(x.dtype)
 
         for i, blk in enumerate(self.layers):
@@ -96,6 +95,7 @@ class Qwen3(nn.Module):
             )
 
         kv_cache.seq_len[slot_ids] += lengths.to(x.device)
+        x = x[indptr[1:] - 1]
         x = self.norm(x)
         x = self.lm_head(x)
 

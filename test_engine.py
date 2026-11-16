@@ -1,4 +1,4 @@
-"""Check an engine's greedy tokens against a one-request-at-a-time reference, in fp32.
+"""Check an engine's greedy tokens against a one-request-at-a-time reference, in bf16.
 
     uv run python test_engine.py static
     uv run python test_engine.py continuous
@@ -6,6 +6,10 @@
 Requests arrive staggered (some up front, the rest mid-run), there are more of them
 than slots, and their max_tokens differ, so slots get freed and refilled at
 different times.
+
+FlashInfer has no fp32 kernels, so this runs in bf16, where batching changes the
+rounding. A first mismatch where the reference's top-2 logit gap is <= NOISE_GAP
+(a tie or one bf16 step) is reported as "~ok" rather than a failure.
 """
 
 import sys
@@ -36,6 +40,7 @@ UP_FRONT = (
     6  # added before the first step; the rest arrive one every ARRIVAL_EVERY steps
 )
 ARRIVAL_EVERY = 3
+NOISE_GAP = 0.125
 
 
 def make_engine(name: str, lm: Qwen3LM):
@@ -52,18 +57,24 @@ def make_engine(name: str, lm: Qwen3LM):
         from engines.chunked import ChunkedEngine
 
         return ChunkedEngine(lm, n_batch=N_SLOTS)
+
+    if name == "ragged":
+        from engines.chunked_ragged import ChunkedRagged
+
+        return ChunkedRagged(lm, n_batch=N_SLOTS)
+
     raise SystemExit(f"unknown engine {name!r}; use static or continuous")
 
 
 def reference(lm: Qwen3LM, req: Request) -> tuple[list[int], list[float]]:
     """Greedy tokens for one request alone, plus the top-1/top-2 logit gap at each step."""
     cache = lm.alloc_cache(1, len(req.prompt_ids) + req.max_tokens)
-    ids = torch.tensor([req.prompt_ids])
+    ids = torch.tensor(req.prompt_ids)
     toks, gaps = [], []
     pos = 0
     while True:
-        n = ids.shape[1]
-        meta = BatchMeta(torch.tensor([n]), torch.tensor([0]), torch.arange(pos, pos + n)[None])
+        n = len(ids)
+        meta = BatchMeta(torch.tensor([n]), torch.tensor([0]), torch.arange(pos, pos + n))
         logits = lm.forward(ids, meta, cache)[0].float()
         pos += n
         top2 = logits.topk(2).values
@@ -72,7 +83,7 @@ def reference(lm: Qwen3LM, req: Request) -> tuple[list[int], list[float]]:
         gaps.append(float(top2[0] - top2[1]))
         if t in lm.eos_token_ids or len(toks) >= req.max_tokens:
             return toks, gaps
-        ids = torch.tensor([[t]])
+        ids = torch.tensor([t])
 
 
 def run_engine(engine, reqs: list[Request]) -> tuple[dict[int, list[TokenEvent]], int]:
@@ -95,7 +106,7 @@ def run_engine(engine, reqs: list[Request]) -> tuple[dict[int, list[TokenEvent]]
 
 def main():
     name = sys.argv[1] if len(sys.argv) > 1 else "continuous"
-    lm = Qwen3LM.from_pretrained(dtype=torch.float32)
+    lm = Qwen3LM.from_pretrained(dtype=torch.bfloat16)
     reqs = [
         Request(i, lm.tokenizer.encode(text).ids, max_tokens)
         for i, (text, max_tokens) in enumerate(PROMPTS)
@@ -106,7 +117,7 @@ def main():
     prompts_before = {req.req_id: list(req.prompt_ids) for req in reqs}
     events, steps = run_engine(make_engine(name, lm), reqs)
 
-    failures = 0
+    failures = noisy = 0
     for req in reqs:
         want, gaps = refs[req.req_id]
         evs = events[req.req_id]
@@ -131,16 +142,27 @@ def main():
             problems.append(
                 f"tokens differ at index {i} (got {len(got)}, want {len(want)}{gap})"
             )
-        status = "ok  " if not problems else "FAIL"
+        noise = (
+            len(problems) == 1
+            and got != want
+            and i < len(gaps)
+            and gaps[i] <= NOISE_GAP
+        )
+        status = "ok  " if not problems else "~ok " if noise else "FAIL"
         print(
             f"{status} req {req.req_id:2d} prompt {len(prompts_before[req.req_id]):3d} tok, max {req.max_tokens:2d}: "
             + ("; ".join(problems) or repr(lm.tokenizer.decode(got)[:40]))
         )
-        if problems:
+        if noise:
+            noisy += 1
+        elif problems:
             print(f"       got  {got}\n       want {want}")
             failures += 1
 
-    print(f"\n{name}: {len(reqs) - failures}/{len(reqs)} requests match, {steps} steps")
+    print(
+        f"\n{name}: {len(reqs) - failures - noisy}/{len(reqs)} requests match exactly, "
+        f"{noisy} differ at a bf16 tie, {failures} fail, {steps} steps"
+    )
     sys.exit(1 if failures else 0)
 
 
