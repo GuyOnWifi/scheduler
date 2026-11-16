@@ -17,18 +17,18 @@ class Engine(Protocol):
 def make(dtype=None, **engine_kwargs) -> Engine:
     """Our Qwen3-0.6B behind the one engine in engine.py (edited in place every rung).
 
-    Now: chunked's schedule as one packed forward per step (no padding);
-    FlashInfer attention, each of the 8 slots one 2048-token page.
+    Now: ragged with a paged KV pool (2048 pages of 16 tokens) instead of 8 slots,
+    admission by free pages, newest-first preemption by recompute.
     """
     # Imported here: engine.py imports this module for the Engine protocol, and
     # `bench.py --help` shouldn't have to load torch.
     import torch
 
-    from engine import ChunkedRagged
+    from engine import ChunkedRaggedPaged
     from model.qwen3_lm import Qwen3LM
 
     lm = Qwen3LM.from_pretrained(dtype=dtype or torch.bfloat16)
-    return ChunkedRagged(lm, **engine_kwargs)
+    return ChunkedRaggedPaged(lm, **engine_kwargs)
 
 
 def from_args(args: argparse.Namespace) -> Engine:

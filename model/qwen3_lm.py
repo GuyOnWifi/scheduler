@@ -1,3 +1,4 @@
+from model.kv_cache import PagedKVCache
 from model.batch_meta import BatchMeta
 from model.kv_cache import KVCache
 import json
@@ -36,14 +37,14 @@ class Qwen3LM:
         eos = json.loads((path / "generation_config.json").read_text())["eos_token_id"]
         return cls(net, tokenizer, frozenset(eos if isinstance(eos, list) else [eos]))
 
-    def alloc_cache(self, batch: int, max_len: int) -> KVCache:
+    def alloc_cache(self, num_pages: int, page_size: int) -> PagedKVCache:
         cfg = self.net.cfg
         weight = self.net.embed_tokens.weight
-        return KVCache.alloc(
+        return PagedKVCache.alloc(
             cfg.num_hidden_layers,
-            batch,
+            num_pages,
             cfg.num_key_value_heads,
-            max_len,
+            page_size,
             cfg.head_dim,
             device=weight.device,
             dtype=weight.dtype,

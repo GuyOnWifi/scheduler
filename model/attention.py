@@ -57,7 +57,7 @@ class GroupQueryAttention(nn.Module):
         self,
         x: torch.Tensor,
         meta: BatchMeta,
-        kv_cache: tuple[torch.Tensor, torch.Tensor],
+        kv_cache: torch.Tensor,
         rope: tuple[torch.Tensor, torch.Tensor],
         prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper,
     ):
@@ -82,12 +82,18 @@ class GroupQueryAttention(nn.Module):
         q_rope = apply_rope(q_norm, sin, cos)
         k_rope = apply_rope(k_norm, sin, cos)
 
-        (k_cache, v_cache) = kv_cache
-        rows = meta.slot_ids.repeat_interleave(meta.lengths)
-        k_cache[rows, :, positions] = k_rope
-        v_cache[rows, :, positions] = v_head
+        # (k_cache, v_cache) = kv_cache
+        # rows = meta.slot_ids.repeat_interleave(meta.lengths)
+        # k_cache[rows, :, positions] = k_rope
+        # v_cache[rows, :, positions] = v_head
 
-        out = prefill_wrapper.run(q_rope, (k_cache, v_cache))  # (N, qh, hd)
+        # shouoldve done nhd bruh
+        page_idx = meta.slot_mappings // meta.page_size
+        offset_idx = meta.slot_mappings % meta.page_size
+        kv_cache[page_idx, 0, :, offset_idx] = k_rope
+        kv_cache[page_idx, 1, :, offset_idx] = v_head
+
+        out = prefill_wrapper.run(q_rope, kv_cache)  # (N, qh, hd)
 
         # unpack back to (nb, nt, ...); padding rows stay zero
         return self.o_proj(out.reshape(nt, self.out_dim))

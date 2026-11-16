@@ -24,3 +24,20 @@ class KVCache:
                 dtype=dtype,
             ),
         )
+
+
+@dataclass
+class PagedKVCache:
+    kv: torch.Tensor  # (layers, num_blocks, 2, num_kv_heads, block_size, head_dim)
+
+    @classmethod
+    def alloc(
+        cls, layers, num_pages, num_kv_heads, page_size, head_dim, device, dtype
+    ) -> Self:
+        return cls(
+            torch.zeros(
+                (layers, num_pages, 2, num_kv_heads, page_size, head_dim),
+                dtype=dtype,
+                device=device,
+            )
+        )

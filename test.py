@@ -1,6 +1,7 @@
 from model.qwen import Qwen3
 from model.batch_meta import BatchMeta
-from model.kv_cache import KVCache
+from model.kv_cache import PagedKVCache
+from math import ceil
 from pathlib import Path
 from huggingface_hub import snapshot_download
 import torch
@@ -48,14 +49,22 @@ for p in prompts:
         # the net takes (x, meta, kv_cache) now: one full prefill into a fresh cache
         n = ids.shape[1]
         cfg = our_qwen.cfg
-        cache = KVCache.alloc(
-            cfg.num_hidden_layers, 1, cfg.num_key_value_heads, n, cfg.head_dim,
+        ps = 16
+        used = ceil(n / ps)  # this prompt owns pages 0..used-1 of its own pool
+        cache = PagedKVCache.alloc(
+            cfg.num_hidden_layers, used, cfg.num_key_value_heads, ps, cfg.head_dim,
             device=device, dtype=DTYPE,
         )
+        i32 = dict(dtype=torch.int32, device=device)
         meta = BatchMeta(
-            torch.tensor([n], device=device),
-            torch.tensor([0], device=device),
-            torch.arange(n, device=device),
+            lengths=torch.tensor([n], device=device),
+            paged_kv_indptr=torch.tensor([0, used], **i32),
+            paged_kv_indices=torch.arange(used, **i32),
+            slot_mappings=torch.arange(n, device=device),
+            positions=torch.arange(n, device=device),
+            indptr=torch.tensor([0, n], **i32),
+            last_page_lens=torch.tensor([(n - 1) % ps + 1], **i32),
+            page_size=ps,
         )
         ours = our_qwen(ids[0], meta, cache)  # packed [N] in, last-token logits [1, vocab] out
         # bf16 now, so not elementwise close to HF: compare the last token's logits,

@@ -3,7 +3,7 @@ import torch
 from typing import Protocol
 
 from model.batch_meta import BatchMeta
-from model.kv_cache import KVCache
+from model.kv_cache import PagedKVCache
 
 
 class Model(Protocol):
@@ -11,17 +11,23 @@ class Model(Protocol):
     vocab_size: int
     tokenizer: Tokenizer
 
-    def alloc_cache(self, batch: int, max_len: int) -> KVCache:
-        """An empty cache for `batch` rows of up to `max_len` tokens each."""
+    def alloc_cache(self, num_pages: int, page_size: int) -> PagedKVCache:
+        """An empty pool of `num_pages` KV pages of `page_size` tokens each, shared by all
+        requests; which pages a request owns is the engine's business."""
         ...
 
     def forward(
-        self, input_ids: torch.Tensor, meta: BatchMeta, kv_cache: KVCache
+        self,
+        input_ids: torch.Tensor,
+        meta: BatchMeta,
+        kv_cache: PagedKVCache,
     ) -> torch.Tensor:
-        """New tokens input_ids [B, T], right-padded, with real lengths meta.lengths [B] -> last-token logits [B, vocab].
+        """New tokens of B requests, packed, input_ids [N] -> last-token logits [B, vocab].
 
-        Batch row i lives in cache row meta.slot_ids[i]. Writes the new tokens into those
-        rows at meta.positions; each attends to every cached position <= its own in its
-        row; other rows are untouched.
+        Request i's tokens are the next meta.lengths[i] entries of input_ids (no padding;
+        N = lengths.sum()), at absolute positions given by meta.positions [N]. They are
+        written into cache row meta.slot_ids[i] and attend to everything already in that
+        row; other rows are untouched. Row i of the result is the logits after request
+        i's last new token.
         """
         ...
