@@ -56,4 +56,7 @@ class Qwen3LM:
     ) -> torch.Tensor:
         device = self.net.embed_tokens.weight.device
         meta = meta.to(device)
-        return self.net(input_ids.to(device), meta, kv_cache)  # [B, vocab]
+
+        ids_gpu = input_ids.to(device)
+
+        return self.net(ids_gpu, meta, kv_cache)  # [B, vocab]

@@ -14,6 +14,13 @@ than a small batch holds, and their max_tokens differ, so batches/slots get free
 and refilled at different times. Some prompts share a 48-token prefix, for prefix
 caching later.
 
+For engines with a prefix cache (hash_to_blocks), the test wraps engine.py's
+RunningReq, the free list and the waiting queue from the outside and prints
+admissions with a hit, matched tokens, hits on freed (cached) pages, evictions of
+cached pages and preemptions. With the paged engine, tok_budget=16 splits prompts
+into chunks, and num_pages=16 or 13 runs out of pages mid-run; with 13 the two
+long-output requests get preempted. The largest request needs 12 pages.
+
 Batching and kernel choice change the rounding, most visibly in bf16. A first
 mismatch where the reference's top-2 logit gap is <= the dtype's noise gap (a tie,
 or one bf16 step) is reported as "~ok" rather than a failure.
@@ -21,6 +28,8 @@ or one bf16 step) is reported as "~ok" rather than a failure.
 
 import json
 import sys
+from collections import OrderedDict, deque
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
@@ -71,6 +80,62 @@ PROMPTS = [
 UP_FRONT = 10  # added before the first step; the rest arrive one every ARRIVAL_EVERY steps
 ARRIVAL_EVERY = 3
 MAX_STEPS = 10_000
+
+
+@dataclass
+class PrefixStats:
+    admits: int = 0
+    preemptions: int = 0
+    readmits: int = 0  # admissions after a preemption
+    hits: int = 0  # admissions starting with num_computed > 0
+    matched_tokens: int = 0
+    prompt_tokens: int = 0
+    freed_page_hits: int = 0  # matched pages nobody was using (ref_count was 0)
+    evictions: int = 0  # cached pages handed out again, dropping their hash
+    matched_by_req: dict[int, list[int]] = field(default_factory=dict)  # per admission
+
+
+def instrument(engine) -> PrefixStats | None:
+    """Count prefix hits from the outside: wrap the engine module's RunningReq to see
+    num_computed at admission, and the free list to see cached pages being reused."""
+    if not hasattr(engine, "hash_to_blocks"):
+        return None
+    mod = sys.modules[type(engine).__module__]
+    stats = PrefixStats()
+    seen = set()
+    page_size = engine.page_size
+
+    class CountingReq(mod.RunningReq):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            stats.admits += 1
+            stats.readmits += self.req_id in seen
+            seen.add(self.req_id)
+            stats.prompt_tokens += len(self.toks)
+            stats.matched_by_req.setdefault(self.req_id, []).append(self.num_computed)
+            if self.num_computed > 0:
+                stats.hits += 1
+                stats.matched_tokens += self.num_computed
+                matched = self.pages[: self.num_computed // page_size]
+                # ref_count was just bumped, so 1 means it was free (cached) before
+                stats.freed_page_hits += sum(b.ref_count == 1 for b in matched)
+
+    class CountingFree(OrderedDict):
+        def popitem(self, last=True):
+            key, blk = super().popitem(last)
+            if blk.hash is not None and engine.hash_to_blocks.get(blk.hash) is blk:
+                stats.evictions += 1
+            return key, blk
+
+    class CountingQueue(deque):
+        def appendleft(self, req):  # only preemption puts a request back in front
+            stats.preemptions += 1
+            super().appendleft(req)
+
+    mod.RunningReq = CountingReq
+    engine.free_kv_slots = CountingFree(engine.free_kv_slots)
+    engine.waiting_queue = CountingQueue(engine.waiting_queue)
+    return stats
 
 
 def load_tokenizer() -> tuple[Path, Tokenizer, frozenset[int]]:
@@ -167,6 +232,7 @@ def main():
 
     refs = references(path, dtype, eos, reqs)
     engine = make(dtype=dtype, **kwargs)
+    stats = instrument(engine)
     events, steps = run_engine(engine, reqs)
 
     gap_ok = NOISE_GAP[dtype_name]
@@ -214,6 +280,18 @@ def main():
         f"{len(reqs) - failures - noisy}/{len(reqs)} requests match exactly, "
         f"{noisy} differ at a tie, {failures} fail, {steps} steps"
     )
+    if stats:
+        print(
+            f"prefix cache: {stats.hits}/{stats.admits} admissions hit, "
+            f"{stats.preemptions} preemptions ({stats.readmits} readmitted), "
+            f"{stats.matched_tokens}/{stats.prompt_tokens} prompt tokens matched, "
+            f"{stats.freed_page_hits} matched pages were free (cached), "
+            f"{stats.evictions} cached pages evicted"
+        )
+        shown = {r: m for r, m in stats.matched_by_req.items() if any(m) or len(m) > 1}
+        print(
+            f"matched tokens per admission (requests with a hit or a readmit): {shown}"
+        )
     sys.exit(1 if failures else 0)
 
 

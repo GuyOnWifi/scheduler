@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from math import ceil
 from collections import deque
 from model.kv_cache import KVCache
@@ -13,12 +14,19 @@ from model.model import Model
 
 
 @dataclass
+class Block:
+    hash: int
+    block_idx: int
+    ref_count: int
+
+
+@dataclass
 class RunningReq:
     req_id: int
     toks: list[int]
     max_tokens: int
     eos_ids: frozenset[int]
-    pages_idx: list[int]
+    pages: list[Block]
     generated: int = 0
     num_computed: int = 0
 
@@ -35,10 +43,13 @@ class ChunkedRaggedPaged(Engine):
         self.model = model
         self.waiting_queue: deque[Request] = deque()
         self.running: list[RunningReq] = []
-        self.free_kv_slots = deque(range(num_pages))
+        self.free_kv_slots = OrderedDict(
+            {i: Block(None, i, 0) for i in range(num_pages)}
+        )
         self.cache = model.alloc_cache(num_pages, page_size)
         self.prefill = False
         self.tok_budget: int = tok_budget
+        self.hash_to_blocks = {}
 
     def add_request(self, req: Request):
         self.waiting_queue.append(req)
@@ -56,12 +67,46 @@ class ChunkedRaggedPaged(Engine):
             reserve = len(self.running)
             if num_pages_needed + reserve <= len(self.free_kv_slots):
                 # admit request
+
+                pages = []
+                num_computed = 0
+
+                # greedy match
+                prev_hash = None
+                for i in range((len(r.prompt_ids) - 1) // self.page_size):
+                    t = r.prompt_ids[i * self.page_size : (i + 1) * self.page_size]
+                    h = hash((prev_hash, tuple(t)))
+                    prev_hash = h
+                    if h in self.hash_to_blocks:
+                        b = self.hash_to_blocks[h]
+                        pages.append(b)
+                        if b.ref_count == 0:
+                            del self.free_kv_slots[b.block_idx]
+                        num_pages_needed -= 1
+                        num_computed += self.page_size
+                        b.ref_count += 1
+
+                    else:
+                        break
+
+                for _ in range(num_pages_needed):
+                    _, blk = self.free_kv_slots.popitem(last=False)
+                    # only drop the map entry if it points to this block (a duplicate copy
+                    # of the same prefix shares the hash but isn't the registered one)
+                    if self.hash_to_blocks.get(blk.hash) is blk:
+                        del self.hash_to_blocks[blk.hash]
+                    blk.hash = None
+                    blk.ref_count += 1
+                    pages.append(blk)
+
                 new = RunningReq(
                     r.req_id,
                     list(r.prompt_ids),
                     r.max_tokens,
                     self.model.eos_token_ids,
-                    [self.free_kv_slots.popleft() for _ in range(num_pages_needed)],
+                    pages,
+                    0,
+                    num_computed,
                 )
                 self.running.append(new)
                 self.waiting_queue.popleft()
@@ -89,10 +134,17 @@ class ChunkedRaggedPaged(Engine):
             # decode
             if (len(r.toks) - r.num_computed) == 1:
                 # needs new page?
-                if len(r.toks) > self.page_size * len(r.pages_idx):
+                if len(r.toks) > self.page_size * len(r.pages):
                     # do we have a apge to give?
                     if self.free_kv_slots:
-                        r.pages_idx.append(self.free_kv_slots.popleft())
+                        _, blk = self.free_kv_slots.popitem(last=False)
+                        # only drop the map entry if it points to this block (a duplicate copy
+                        # of the same prefix shares the hash but isn't the registered one)
+                        if self.hash_to_blocks.get(blk.hash) is blk:
+                            del self.hash_to_blocks[blk.hash]
+                        blk.hash = None
+                        blk.ref_count += 1
+                        r.pages.append(blk)
                     else:
                         # preempt
 
@@ -102,7 +154,11 @@ class ChunkedRaggedPaged(Engine):
                             idx -= 1
                         to_preempt = self.running[idx]
 
-                        self.free_kv_slots.extend(to_preempt.pages_idx)
+                        for blk in reversed(to_preempt.pages):
+                            blk.ref_count -= 1
+                            if blk.ref_count == 0:
+                                self.free_kv_slots[blk.block_idx] = blk
+
                         self.waiting_queue.appendleft(
                             Request(
                                 to_preempt.req_id,
@@ -116,7 +172,14 @@ class ChunkedRaggedPaged(Engine):
                             # self preemption
                             break
                         else:
-                            r.pages_idx.append(self.free_kv_slots.popleft())
+                            _, blk = self.free_kv_slots.popitem(last=False)
+                            # only drop the map entry if it points to this block (a duplicate copy
+                            # of the same prefix shares the hash but isn't the registered one)
+                            if self.hash_to_blocks.get(blk.hash) is blk:
+                                del self.hash_to_blocks[blk.hash]
+                            blk.hash = None
+                            blk.ref_count += 1
+                            r.pages.append(blk)
                 to_process.append((r, 1))
 
         budget = self.tok_budget - len(to_process)
@@ -146,7 +209,7 @@ class ChunkedRaggedPaged(Engine):
             paged_kv_indptr = torch.nn.functional.pad(
                 torch.tensor(
                     [
-                        len(x.pages_idx[: ceil((x.num_computed + b) / self.page_size)])
+                        len(x.pages[: ceil((x.num_computed + b) / self.page_size)])
                         for (x, b) in to_process
                     ]
                 ).cumsum(0),
@@ -155,7 +218,12 @@ class ChunkedRaggedPaged(Engine):
             paged_kv_indices = torch.cat(
                 [
                     torch.tensor(
-                        x.pages_idx[: ceil((x.num_computed + b) / self.page_size)]
+                        [
+                            blk.block_idx
+                            for blk in x.pages[
+                                : ceil((x.num_computed + b) / self.page_size)
+                            ]
+                        ]
                     )
                     for (x, b) in to_process
                 ]
@@ -177,7 +245,7 @@ class ChunkedRaggedPaged(Engine):
                 [
                     torch.tensor(
                         [
-                            x.pages_idx[(x.num_computed + i) // self.page_size]
+                            x.pages[(x.num_computed + i) // self.page_size].block_idx
                             * self.page_size
                             + (x.num_computed + i) % self.page_size
                             for i in range(b)
@@ -211,10 +279,36 @@ class ChunkedRaggedPaged(Engine):
                     req.generated += 1
                     toks.append(TokenEvent(req.req_id, t, req.done))
 
+                # hash the blocks
+                for i in range(
+                    req.num_computed // self.page_size,
+                    (req.num_computed + b) // self.page_size,
+                ):
+                    # starting block
+                    prev_hash = None
+                    if i > 0:
+                        prev_hash = req.pages[i - 1].hash
+
+                    h = hash(
+                        (
+                            prev_hash,
+                            tuple(
+                                req.toks[i * self.page_size : (i + 1) * self.page_size]
+                            ),
+                        )
+                    )
+                    req.pages[i].hash = h
+
+                    # keep the first block registered for h; a later duplicate stays private
+                    self.hash_to_blocks.setdefault(h, req.pages[i])
+
                 req.num_computed += b
 
                 if req.done:
-                    self.free_kv_slots.extend(req.pages_idx)
+                    for blk in reversed(req.pages):
+                        blk.ref_count -= 1
+                        if blk.ref_count == 0:
+                            self.free_kv_slots[blk.block_idx] = blk
 
         self.running = [r for r in self.running if not r.done]
 
