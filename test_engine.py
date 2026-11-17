@@ -5,12 +5,22 @@
 The model takes a paged KV cache now, so only the paged engine runs (static,
 continuous, chunked and ragged still build the old metadata). For paged, a small
 TOK_BUDGET (e.g. 16) splits prompts into several chunks, and a small NUM_PAGES
-(e.g. 16 pages of 16 tokens; 24 is still enough) runs out of memory mid-run and
-forces preemption. The largest request needs 12 pages, so stay at or above that.
+(e.g. 16 or 13 pages of 16 tokens) runs out of memory mid-run; with 13 the two
+long-output requests get preempted (the admission reserve avoids it otherwise). The
+largest request needs 12 pages, so stay at or above that.
 
 Requests arrive staggered (some up front, the rest mid-run), there are more of them
 than slots, and their max_tokens differ, so slots get freed and refilled at
 different times.
+
+Some prompts share a 48-token (3-page) prefix to exercise prefix caching: two
+identical ones arrive in the same step (both miss), later ones hit it, one is exactly
+the prefix (a multiple of 16: only 2 pages may match, the last token is computed),
+one is a 40-token cut of it, and repeats arrive late enough to hit pages of finished
+requests. A small NUM_PAGES also evicts cached pages. For engines with a prefix
+cache (hash_to_blocks), the test wraps RunningReq, the free list and the waiting
+queue from the outside and prints admissions with a hit, matched tokens, hits on
+freed (cached) pages, evictions of cached pages and preemptions.
 
 FlashInfer has no fp32 kernels, so this runs in bf16, where batching changes the
 rounding. A first mismatch where the reference's top-2 logit gap is <= NOISE_GAP
@@ -18,6 +28,8 @@ rounding. A first mismatch where the reference's top-2 logit gap is <= NOISE_GAP
 """
 
 import sys
+from collections import OrderedDict, deque
+from dataclasses import dataclass, field
 from math import ceil
 
 import torch
@@ -29,22 +41,45 @@ from model.qwen3_lm import Qwen3LM
 N_SLOTS = 4
 PAGE_SIZE = 16
 
+# a prompt is text, or (n, text): the first n tokens of SHARED_TEXT, then text's tokens
+SHARED_TEXT = (
+    "You are a helpful assistant running on a small GPU. Answer briefly and "
+    "precisely, in plain English, without lists or markdown. If you do not know an "
+    "answer, say so instead of guessing. Keep every reply under fifty words, and "
+    "never repeat the question back.\n\n"
+)
+SHARED_LEN = 48  # 3 full pages
+LONG = "A long prompt about engineers. " * 30
+
 PROMPTS = [
+    # long outputs: with a small NUM_PAGES these get preempted and, when readmitted,
+    # match their own cached pages (prompt and generated tokens)
+    ((SHARED_LEN, " Write a long story about a dragon."), 48),
+    ((SHARED_LEN, " Write a long poem about the sea."), 48),
     ("The capital of France is", 12),
     ("Hi", 1),  # finishes straight out of prefill
     ("def fibonacci(n):", 30),
     ("Once upon a time, in a land far, far away, there lived a", 20),
     ("1, 2, 3, 4,", 8),
     ("Explain the KV cache in one sentence.", 25),
+    # same step, identical: both miss and compute the same pages
+    ((SHARED_LEN, "Q: Name a colour.\nA:"), 8),
+    ((SHARED_LEN, "Q: Name a colour.\nA:"), 8),
     ("The quick brown fox", 5),
     ("Q: What is 17 * 23?\nA:", 16),
     ("Hello", 2),
     ("Write a haiku about GPUs:\n", 18),
-    ("A long prompt about engineers. " * 30, 10),
+    (LONG, 10),
     ("请用一句话解释什么是注意力机制。", 14),
+    ((SHARED_LEN, " Tell me a joke about compilers."), 12),  # hits the 3 shared pages
+    ((SHARED_LEN, ""), 6),  # exactly the prefix: 2 pages match, last page computed
+    ((40, ""), 6),  # 40 tokens of it: 2 pages match
+    ((SHARED_LEN, "Q: Name a colour.\nA:"), 8),  # repeat of the pair, after they finish
+    ("The capital of France is", 4),  # under a page: nothing to match
+    (LONG, 6),  # repeat: 11 pages of a finished request
 ]
 UP_FRONT = (
-    6  # added before the first step; the rest arrive one every ARRIVAL_EVERY steps
+    10  # added before the first step; the rest arrive one every ARRIVAL_EVERY steps
 )
 ARRIVAL_EVERY = 3
 NOISE_GAP = 0.125
@@ -81,6 +116,71 @@ def make_engine(name: str, lm: Qwen3LM):
         return ChunkedRaggedPaged(lm, page_size=PAGE_SIZE, **kwargs)
 
     raise SystemExit(f"unknown engine {name!r}; use paged")
+
+
+@dataclass
+class PrefixStats:
+    admits: int = 0
+    preemptions: int = 0
+    readmits: int = 0  # admissions after a preemption
+    hits: int = 0  # admissions starting with num_computed > 0
+    matched_tokens: int = 0
+    prompt_tokens: int = 0
+    freed_page_hits: int = 0  # matched pages nobody was using (ref_count was 0)
+    evictions: int = 0  # cached pages handed out again, dropping their hash
+    matched_by_req: dict[int, list[int]] = field(default_factory=dict)  # per admission
+
+
+def instrument(engine) -> PrefixStats | None:
+    """Count prefix hits from the outside: wrap the engine module's RunningReq to see
+    num_computed at admission, and the free list to see cached pages being reused."""
+    if not hasattr(engine, "hash_to_blocks"):
+        return None
+    mod = sys.modules[type(engine).__module__]
+    stats = PrefixStats()
+    seen = set()
+    page_size = engine.page_size
+
+    class CountingReq(mod.RunningReq):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            stats.admits += 1
+            stats.readmits += self.req_id in seen
+            seen.add(self.req_id)
+            stats.prompt_tokens += len(self.toks)
+            stats.matched_by_req.setdefault(self.req_id, []).append(self.num_computed)
+            if self.num_computed > 0:
+                stats.hits += 1
+                stats.matched_tokens += self.num_computed
+                matched = self.pages[: self.num_computed // page_size]
+                # ref_count was just bumped, so 1 means it was free (cached) before
+                stats.freed_page_hits += sum(b.ref_count == 1 for b in matched)
+
+    class CountingFree(OrderedDict):
+        def popitem(self, last=True):
+            key, blk = super().popitem(last)
+            if blk.hash is not None and engine.hash_to_blocks.get(blk.hash) is blk:
+                stats.evictions += 1
+            return key, blk
+
+    class CountingQueue(deque):
+        def appendleft(self, req):  # only preemption puts a request back in front
+            stats.preemptions += 1
+            super().appendleft(req)
+
+    mod.RunningReq = CountingReq
+    engine.free_kv_slots = CountingFree(engine.free_kv_slots)
+    engine.waiting_queue = CountingQueue(engine.waiting_queue)
+    return stats
+
+
+def encode(lm: Qwen3LM, prompt) -> list[int]:
+    if isinstance(prompt, str):
+        return lm.tokenizer.encode(prompt).ids
+    n, text = prompt
+    shared = lm.tokenizer.encode(SHARED_TEXT).ids
+    assert len(shared) >= n, len(shared)
+    return shared[:n] + (lm.tokenizer.encode(text).ids if text else [])
 
 
 def reference(lm: Qwen3LM, req: Request) -> tuple[list[int], list[float]]:
@@ -141,14 +241,16 @@ def main():
     name = sys.argv[1] if len(sys.argv) > 1 else "continuous"
     lm = Qwen3LM.from_pretrained(dtype=torch.bfloat16)
     reqs = [
-        Request(i, lm.tokenizer.encode(text).ids, max_tokens)
-        for i, (text, max_tokens) in enumerate(PROMPTS)
+        Request(i, encode(lm, prompt), max_tokens)
+        for i, (prompt, max_tokens) in enumerate(PROMPTS)
     ]
 
     # references first: they must see the original prompts
     refs = {req.req_id: reference(lm, req) for req in reqs}
     prompts_before = {req.req_id: list(req.prompt_ids) for req in reqs}
-    events, steps = run_engine(make_engine(name, lm), reqs)
+    engine = make_engine(name, lm)
+    stats = instrument(engine)
+    events, steps = run_engine(engine, reqs)
 
     failures = noisy = 0
     for req in reqs:
@@ -196,6 +298,16 @@ def main():
         f"\n{name}: {len(reqs) - failures - noisy}/{len(reqs)} requests match exactly, "
         f"{noisy} differ at a bf16 tie, {failures} fail, {steps} steps"
     )
+    if stats:
+        print(
+            f"prefix cache: {stats.hits}/{stats.admits} admissions hit, "
+            f"{stats.preemptions} preemptions ({stats.readmits} readmitted), "
+            f"{stats.matched_tokens}/{stats.prompt_tokens} prompt tokens matched, "
+            f"{stats.freed_page_hits} matched pages were free (cached), "
+            f"{stats.evictions} cached pages evicted"
+        )
+        shown = {r: m for r, m in stats.matched_by_req.items() if any(m) or len(m) > 1}
+        print(f"matched tokens per admission (requests with a hit or a readmit): {shown}")
     sys.exit(1 if failures else 0)
 
 

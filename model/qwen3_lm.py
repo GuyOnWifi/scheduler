@@ -59,4 +59,19 @@ class Qwen3LM:
     ) -> torch.Tensor:
         device = self.net.embed_tokens.weight.device
         meta = meta.to(device)
-        return self.net(input_ids.to(device), meta, kv_cache)  # [B, vocab]
+        self.prefill_wrapper.plan(
+            meta.indptr,
+            meta.paged_kv_indptr,
+            meta.paged_kv_indices,
+            meta.last_page_lens,
+            self.cfg.num_attention_heads,
+            self.cfg.num_key_value_heads,
+            self.cfg.head_dim,
+            meta.page_size,
+            causal=True,
+            q_data_type=self.embed_tokens.weight.dtype,
+        )
+
+        ids_gpu = input_ids.to(device)
+
+        return self.net(ids_gpu, meta, kv_cache)  # [B, vocab]
