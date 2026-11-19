@@ -48,27 +48,7 @@ class Qwen3(nn.Module):
         self.register_buffer("sin", sin.to(dtype=cfg.torch_dtype), persistent=False)
         self.register_buffer("cos", cos.to(dtype=cfg.torch_dtype), persistent=False)
 
-        self.ws = torch.empty(
-            128 << 20, dtype=torch.uint8, device="cuda"
-        )  # scratch space for the kernel
-        self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-            self.ws, kv_layout="HND"
-        )
-
-    def forward(self, x, meta: BatchMeta, kv_cache: PagedKVCache):
-
-        self.prefill_wrapper.plan(
-            meta.indptr,
-            meta.paged_kv_indptr,
-            meta.paged_kv_indices,
-            meta.last_page_lens,
-            self.cfg.num_attention_heads,
-            self.cfg.num_key_value_heads,
-            self.cfg.head_dim,
-            meta.page_size,
-            causal=True,
-            q_data_type=self.embed_tokens.weight.dtype,
-        )
+    def forward(self, x, meta: BatchMeta, kv_cache: PagedKVCache, wrapper):
 
         x = self.embed_tokens(x)
         # mask = torch.triu(
@@ -87,7 +67,7 @@ class Qwen3(nn.Module):
                 meta,
                 (kv_cache.kv[i]),
                 (sin, cos),
-                self.prefill_wrapper,
+                wrapper,
             )
 
         x = x[meta.indptr[1:] - 1]

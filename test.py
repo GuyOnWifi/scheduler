@@ -2,6 +2,7 @@ from model.qwen import Qwen3
 from model.batch_meta import BatchMeta
 from model.kv_cache import PagedKVCache
 from math import ceil
+from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 from pathlib import Path
 from huggingface_hub import snapshot_download
 import torch
@@ -41,6 +42,9 @@ prompts = [
 path = Path(snapshot_download(MODEL_ID, allow_patterns=["*.json", "*.safetensors"]))
 
 our_qwen = Qwen3.load(path, device="cuda", dtype=DTYPE).eval()
+wrapper = BatchPrefillWithPagedKVCacheWrapper(
+    torch.empty(128 << 20, dtype=torch.uint8, device=device), kv_layout="HND"
+)
 
 for p in prompts:
     ids = torch.tensor([tokenizer.encode(p)], device=device)
@@ -57,7 +61,6 @@ for p in prompts:
         )
         i32 = dict(dtype=torch.int32, device=device)
         meta = BatchMeta(
-            lengths=torch.tensor([n], device=device),
             paged_kv_indptr=torch.tensor([0, used], **i32),
             paged_kv_indices=torch.arange(used, **i32),
             slot_mappings=torch.arange(n, device=device),
@@ -66,7 +69,13 @@ for p in prompts:
             last_page_lens=torch.tensor([(n - 1) % ps + 1], **i32),
             page_size=ps,
         )
-        ours = our_qwen(ids[0], meta, cache)  # packed [N] in, last-token logits [1, vocab] out
+        # the net takes the attention wrapper too now (Qwen3LM owns and plans it)
+        wrapper.plan(
+            meta.indptr, meta.paged_kv_indptr, meta.paged_kv_indices,
+            meta.last_page_lens, cfg.num_attention_heads, cfg.num_key_value_heads,
+            cfg.head_dim, ps, causal=True, q_data_type=DTYPE,
+        )
+        ours = our_qwen(ids[0], meta, cache, wrapper)  # packed [N] in, last-token logits [1, vocab] out
         # bf16 now, so not elementwise close to HF: compare the last token's logits,
         # greedy pick must match unless HF's top-2 are within NOISE_GAP
         ref_last, ours_last = ref[0, -1].float(), ours[0].float()

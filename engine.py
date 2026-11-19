@@ -37,16 +37,27 @@ class RunningReq:
 
 
 class ChunkedRaggedPaged(Engine):
-    def __init__(self, model: Model, tok_budget=512, num_pages=2048, page_size=16):
+    def __init__(
+        self,
+        model: Model,
+        tok_budget=512,
+        num_pages=2048,
+        page_size=16,
+        max_seq_len=4096,
+        graph_buckets=(1, 2, 4, 8, 16, 32, 64),
+    ):
         self.num_pages = num_pages
         self.page_size = page_size
         self.model = model
         self.waiting_queue: deque[Request] = deque()
         self.running: list[RunningReq] = []
         self.free_kv_slots = OrderedDict(
-            {i: Block(None, i, 0) for i in range(num_pages)}
+            # page 0 is the dummy page the CUDA graphs' padding rows write into
+            {i: Block(None, i, 0) for i in range(1, num_pages)}
         )
         self.cache = model.alloc_cache(num_pages, page_size)
+        # after alloc_cache: the graphs bake in this cache's address
+        model.build_graphs(graph_buckets, page_size, self.cache, max_seq_len)
         self.prefill = False
         self.tok_budget: int = tok_budget
         self.hash_to_blocks = {}
@@ -260,7 +271,6 @@ class ChunkedRaggedPaged(Engine):
             prefill_out = self.model.forward(
                 prefill_token_list,
                 BatchMeta(
-                    lengths=lengths,
                     paged_kv_indptr=paged_kv_indptr,
                     paged_kv_indices=paged_kv_indices,
                     slot_mappings=slot_mappings,
