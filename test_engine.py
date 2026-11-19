@@ -197,7 +197,6 @@ def reference(lm: Qwen3LM, req: Request) -> tuple[list[int], list[float]]:
         kv_len = pos + n  # KV length after this step, new tokens included
         used = ceil(kv_len / ps)
         meta = BatchMeta(
-            lengths=torch.tensor([n]),
             paged_kv_indptr=torch.tensor([0, used], dtype=torch.int32),
             paged_kv_indices=torch.tensor(pages[:used], dtype=torch.int32),
             slot_mappings=torch.tensor(
@@ -307,7 +306,9 @@ def main():
             f"{stats.evictions} cached pages evicted"
         )
         shown = {r: m for r, m in stats.matched_by_req.items() if any(m) or len(m) > 1}
-        print(f"matched tokens per admission (requests with a hit or a readmit): {shown}")
+        print(
+            f"matched tokens per admission (requests with a hit or a readmit): {shown}"
+        )
     sys.exit(1 if failures else 0)
 
 
