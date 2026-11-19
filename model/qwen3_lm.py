@@ -53,8 +53,9 @@ class StaticDecodeData:
     def view(self, meta: BatchMeta, pad_to):
         nt = meta.positions.shape[0]
         self.slot_mappings_gpu[:pad_to] = 0  # dummy slot
-        self.slot_mappings_gpu[:nt].copy_(meta.slot_mappings)
-        self.positions_gpu[:nt].copy_(meta.positions)
+        # pinned + non_blocking, so the copy is queued instead of waiting for the GPU
+        self.slot_mappings_gpu[:nt].copy_(meta.slot_mappings.pin_memory(), non_blocking=True)
+        self.positions_gpu[:nt].copy_(meta.positions.pin_memory(), non_blocking=True)
 
         return BatchMeta(
             meta.paged_kv_indptr,
@@ -213,6 +214,11 @@ class Qwen3LM:
         )
         paged_kv_indices = torch.nn.functional.pad(
             meta.paged_kv_indices, (0, pad_to - b)
+        )
+        # on the GPU: from a CPU tensor, plan() would copy it into the graph's buffer
+        # blocking (syncs the stream); GPU -> GPU is queued
+        paged_kv_indices = paged_kv_indices.pin_memory().to(
+            self.data.device, non_blocking=True
         )
         last_page_lens = torch.nn.functional.pad(
             meta.last_page_lens, (0, pad_to - b), value=1

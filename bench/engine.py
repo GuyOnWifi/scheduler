@@ -20,7 +20,8 @@ def make(dtype=None, **engine_kwargs) -> Engine:
     Now: ragged with a paged KV pool (2048 pages of 16 tokens) instead of 8 slots,
     admission by free pages, newest-first preemption by recompute; full pages are
     hashed (chained over the prefix) and reused by later requests, refcounted;
-    decode-only steps replay a CUDA graph (batch padded to 1, 2, 4, ..., 64).
+    decode-only steps replay a CUDA graph (batch padded to 1, 2, 4, ..., 64);
+    overlap: step N+1 is scheduled and launched before step N's tokens are read back.
     """
     # Imported here: engine.py imports this module for the Engine protocol, and
     # `bench.py --help` shouldn't have to load torch.

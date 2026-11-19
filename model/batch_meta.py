@@ -33,12 +33,16 @@ class BatchMeta:
     page_size: int
 
     def to(self, device) -> Self:
+        # pinned + non_blocking, so the copy is queued instead of waiting for the GPU
+        def mv(t):
+            return t.pin_memory().to(device, non_blocking=True)
+
         return replace(
             self,
-            paged_kv_indptr=self.paged_kv_indptr.to(device),
-            paged_kv_indices=self.paged_kv_indices.to(device),
-            slot_mappings=self.slot_mappings.to(device),
-            positions=self.positions.to(device),
-            indptr=self.indptr.to(device),
-            last_page_lens=self.last_page_lens.to(device),
+            paged_kv_indptr=mv(self.paged_kv_indptr),
+            paged_kv_indices=mv(self.paged_kv_indices),
+            slot_mappings=mv(self.slot_mappings),
+            positions=mv(self.positions),
+            indptr=mv(self.indptr),
+            last_page_lens=mv(self.last_page_lens),
         )
