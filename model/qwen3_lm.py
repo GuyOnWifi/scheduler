@@ -54,7 +54,9 @@ class StaticDecodeData:
         nt = meta.positions.shape[0]
         self.slot_mappings_gpu[:pad_to] = 0  # dummy slot
         # pinned + non_blocking, so the copy is queued instead of waiting for the GPU
-        self.slot_mappings_gpu[:nt].copy_(meta.slot_mappings.pin_memory(), non_blocking=True)
+        self.slot_mappings_gpu[:nt].copy_(
+            meta.slot_mappings.pin_memory(), non_blocking=True
+        )
         self.positions_gpu[:nt].copy_(meta.positions.pin_memory(), non_blocking=True)
 
         return BatchMeta(
@@ -115,6 +117,9 @@ class Qwen3LM:
             dtype=weight.dtype,
         )
 
+    def compile(self):
+        self.net.forward = torch.compile(self.net.forward, dynamic=True)
+
     def build_graphs(self, buckets, page_size, kv_cache, max_seq_len):
 
         self.max_buckets = max(buckets)
@@ -130,7 +135,6 @@ class Qwen3LM:
 
         output = {}
         for b in reversed(self.buckets):
-            print(f"graphing {b}")
             sample_input_ids = torch.zeros(b, dtype=torch.int64)
             slot_mappings = torch.zeros(b, dtype=torch.int64)
             last_page_lens = torch.ones(
@@ -178,11 +182,9 @@ class Qwen3LM:
 
             with torch.inference_mode():
                 # warmup:
-                print("warming up")
                 for _ in range(3):
                     self.net(self.data.input_ids_gpu[:b], meta_gpu, kv_cache, decode)
 
-                print("recording graph")
                 g = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(g, pool=mem_pool):
                     out = self.net(

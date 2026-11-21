@@ -58,12 +58,17 @@ class ChunkedRaggedPaged(Engine):
         )
         self.cache = model.alloc_cache(num_pages, page_size)
         self.device = self.cache.kv.device
-        # after alloc_cache: the graphs bake in this cache's address
-        model.build_graphs(graph_buckets, page_size, self.cache, max_seq_len)
+
         self.prefill = False
         self.tok_budget: int = tok_budget
         self.hash_to_blocks = {}
         self.in_flight = None
+
+        # compile the model
+        model.compile()
+
+        # after alloc_cache: the graphs bake in this cache's address
+        model.build_graphs(graph_buckets, page_size, self.cache, max_seq_len)
 
     def add_request(self, req: Request):
         self.waiting_queue.append(req)

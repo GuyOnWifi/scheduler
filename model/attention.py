@@ -30,6 +30,17 @@ def apply_rope(x, sin, cos):
     return x_rot.to(dtype=x.dtype)
 
 
+
+# eager: an in-place index_put into the cache inside a compiled graph makes Inductor
+# copy the whole layer cache in and out every step
+@torch.compiler.disable
+def _write_kv_and_attend(meta, kv_cache, k_rope, v_head, q_rope, wrapper):
+    page_idx = meta.slot_mappings // meta.page_size
+    offset_idx = meta.slot_mappings % meta.page_size
+    kv_cache[page_idx, 0, :, offset_idx] = k_rope
+    kv_cache[page_idx, 1, :, offset_idx] = v_head
+    return wrapper.run(q_rope, kv_cache)
+
 class GroupQueryAttention(nn.Module):
     def __init__(self, embd_dim, head_dim, num_q_heads, num_kv_heads, dtype):
         super().__init__()
@@ -88,12 +99,9 @@ class GroupQueryAttention(nn.Module):
         # v_cache[rows, :, positions] = v_head
 
         # shouoldve done nhd bruh
-        page_idx = meta.slot_mappings // meta.page_size
-        offset_idx = meta.slot_mappings % meta.page_size
-        kv_cache[page_idx, 0, :, offset_idx] = k_rope
-        kv_cache[page_idx, 1, :, offset_idx] = v_head
-
-        out = prefill_wrapper.run(q_rope, kv_cache)  # (N, qh, hd)
+        out = _write_kv_and_attend(
+            meta, kv_cache, k_rope, v_head, q_rope, prefill_wrapper
+        )  # (N, qh, hd)
 
         # unpack back to (nb, nt, ...); padding rows stay zero
         return self.o_proj(out.reshape(nt, self.out_dim))
