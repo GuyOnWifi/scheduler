@@ -41,11 +41,11 @@ class ChunkedRaggedPaged(Engine):
     def __init__(
         self,
         model: Model,
-        tok_budget=512,
-        num_pages=2048,
+        tok_budget=2048,
+        num_pages=4096,
         page_size=16,
         max_seq_len=4096,
-        graph_buckets=(1, 2, 4, 8, 16, 32, 64),
+        graph_buckets=(1, 2, 4, 8, 16, 32, 48, 64, 96, 128),
     ):
         self.num_pages = num_pages
         self.page_size = page_size
